@@ -16,6 +16,8 @@ import android.os.Looper;
 import android.support.annotation.Nullable;
 import java.util.Arrays;
 
+import android.hardware.camera2.CameraCaptureSession;
+
 @SuppressWarnings("deprecation")
 abstract class CameraCapturer implements CameraVideoCapturer {
   enum SwitchState {
@@ -98,6 +100,15 @@ abstract class CameraCapturer implements CameraVideoCapturer {
 
   @Nullable
   private final CameraSession.Events cameraSessionEventsHandler = new CameraSession.Events() {
+    
+    @Override
+    public void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession){
+      checkIsOnCameraThread();
+      synchronized (stateLock) {
+        eventsHandler.onCameraCaptureSessionReady(cameraName);//passing to upper level the exposed camera capture session
+      }
+    }
+
     @Override
     public void onCameraOpening() {
       checkIsOnCameraThread();
@@ -183,6 +194,7 @@ abstract class CameraCapturer implements CameraVideoCapturer {
   private final Object stateLock = new Object();
   private boolean sessionOpening; /* guarded by stateLock */
   @Nullable private CameraSession currentSession; /* guarded by stateLock */
+  private CameraCaptureSession cameraCaptureSession;
   private String cameraName; /* guarded by stateLock */
   private int width; /* guarded by stateLock */
   private int height; /* guarded by stateLock */
@@ -198,6 +210,10 @@ abstract class CameraCapturer implements CameraVideoCapturer {
       CameraEnumerator cameraEnumerator) {
     if (eventsHandler == null) {
       eventsHandler = new CameraEventsHandler() {
+        @Override
+        public void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession) {
+          Logging.d(TAG, "Camera capture session ready but event handler wasn't specified, pass in call back handler in order to control camera");
+        }
         @Override
         public void onCameraError(String errorDescription) {}
         @Override

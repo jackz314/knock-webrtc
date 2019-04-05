@@ -176,7 +176,8 @@ class Camera2Session implements CameraSession {
 
         captureRequestBuilder.addTarget(surface);
         session.setRepeatingRequest(
-            captureRequestBuilder.build(), new CameraCaptureCallback(), cameraThreadHandler);
+            captureRequestBuilder.build(), new CameraCaptureCallback()/*capture callbacks*/, cameraThreadHandler);
+        events.onCameraCaptureSessionReady(session);//expose camera capture session to public
       } catch (CameraAccessException e) {
         reportError("Failed to start capture request. " + e);
         return;
@@ -205,7 +206,7 @@ class Camera2Session implements CameraSession {
                                (TextureBufferImpl) frame.getBuffer(),
                                /* mirror= */ isCameraFrontFacing,
                                /* rotation= */ -cameraOrientation),
-                /* rotation= */ getFrameOrientation(), frame.getTimestampNs());
+                /* rotation= */ getCameraOrientation(), frame.getTimestampNs());
         events.onFrameCaptured(Camera2Session.this, modifiedFrame);
         modifiedFrame.release();
       });
@@ -277,6 +278,11 @@ class Camera2Session implements CameraSession {
         cameraId, width, height, framerate);
   }
 
+  //exposing the camera session to app to make requests
+  public CameraCaptureSession getCameraCaptureSession(){
+    return this.captureSession;
+  }
+
   private Camera2Session(CreateSessionCallback callback, Events events, Context applicationContext,
       CameraManager cameraManager, SurfaceTextureHelper surfaceTextureHelper, String cameraId,
       int width, int height, int framerate) {
@@ -284,7 +290,8 @@ class Camera2Session implements CameraSession {
 
     constructionTimeNs = System.nanoTime();
 
-    this.cameraThreadHandler = new Handler();
+    //same handler as surfacetexturehelper, so that it's accessable in program as well
+    this.cameraThreadHandler = surfaceTextureHelper.getHandler();
     this.callback = callback;
     this.events = events;
     this.applicationContext = applicationContext;
@@ -406,7 +413,7 @@ class Camera2Session implements CameraSession {
     }
   }
 
-  private int getFrameOrientation() {
+  public int getCameraOrientation() {
     int rotation = CameraSession.getDeviceOrientation(applicationContext);
     if (!isCameraFrontFacing) {
       rotation = 360 - rotation;
