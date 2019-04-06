@@ -223,7 +223,8 @@ def BuildAar(archs, output_file, use_goma=False, extra_gn_args=None,
 
 
 def main():
-  sys.stdout.write("Starting aar build...\n");
+  sys.stdout.write("Starting aar build...\n")
+  sys.stdout.flush()
   args = _ParseArgs()
   logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
   logging.basicConfig(stream=sys.stdout, level=logging.DEBUG if args.verbose else logging.INFO)
