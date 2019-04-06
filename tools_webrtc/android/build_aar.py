@@ -225,6 +225,7 @@ def BuildAar(archs, output_file, use_goma=False, extra_gn_args=None,
 def main():
   logging.info("Starting the build...")
   args = _ParseArgs()
+  logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
   logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
   BuildAar(args.arch, args.output, args.use_goma, args.extra_gn_args,
