@@ -3,9 +3,9 @@ install:
   - chmod u+x travis-install-webrtc-dep.sh
   - ./travis-install-webrtc-dep.sh
 script:
-  - "ls"
-  - "chmod u+x $TRAVIS_BUILD_DIR/tools_webrtc/android/build_arr.py"
-  - "$TRAVIS_BUILD_DIR/tools_webrtc/android/build_arr.py"
+  - "cd tools_webrtc/android"
+  - "chmod u+x build_arr.py"
+  - "build_aar.py"
 before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
