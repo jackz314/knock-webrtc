@@ -4,7 +4,7 @@ install:
   - ./travis-install-webrtc-dep.sh
 script:
   - chmod u+x tools_webrtc/android/build_aar.py
-  - tools_webrtc/android/build_aar.py
+  - python tools_webrtc/android/build_aar.py
 before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
