@@ -94,6 +94,9 @@ class VideoReceiveStream : public webrtc::VideoReceiveStream,
   bool SetBaseMinimumPlayoutDelayMs(int delay_ms) override;
   int GetBaseMinimumPlayoutDelayMs() const override;
 
+  void SetFrameDecryptor(
+      rtc::scoped_refptr<FrameDecryptorInterface> frame_decryptor) override;
+
   // Implements rtc::VideoSinkInterface<VideoFrame>.
   void OnFrame(const VideoFrame& video_frame) override;
 
@@ -129,8 +132,12 @@ class VideoReceiveStream : public webrtc::VideoReceiveStream,
   std::vector<webrtc::RtpSource> GetSources() const override;
 
  private:
+  int64_t GetWaitMs() const;
   static void DecodeThreadFunction(void* ptr);
   bool Decode();
+  void HandleEncodedFrame(std::unique_ptr<video_coding::EncodedFrame> frame);
+  void HandleFrameBufferTimeout();
+
   void UpdatePlayoutDelays() const
       RTC_EXCLUSIVE_LOCKS_REQUIRED(playout_delay_lock_);
 
