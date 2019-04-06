@@ -177,7 +177,8 @@ class Camera2Session implements CameraSession {
         captureRequestBuilder.addTarget(surface);
         session.setRepeatingRequest(
             captureRequestBuilder.build(), new CameraCaptureCallback()/*capture callbacks*/, cameraThreadHandler);
-        events.onCameraCaptureSessionReady(session);//expose camera capture session to public
+        //expose camera capture session to public
+        events.onCameraCaptureSessionReady(session);
       } catch (CameraAccessException e) {
         reportError("Failed to start capture request. " + e);
         return;
@@ -276,11 +277,6 @@ class Camera2Session implements CameraSession {
       int framerate) {
     new Camera2Session(callback, events, applicationContext, cameraManager, surfaceTextureHelper,
         cameraId, width, height, framerate);
-  }
-
-  //exposing the camera session to app to make requests
-  public CameraCaptureSession getCameraCaptureSession(){
-    return this.captureSession;
   }
 
   private Camera2Session(CreateSessionCallback callback, Events events, Context applicationContext,

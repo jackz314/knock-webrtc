@@ -106,7 +106,7 @@ abstract class CameraCapturer implements CameraVideoCapturer {
       checkIsOnCameraThread();
       synchronized (stateLock) {
         //passing to upper level the exposed camera capture session
-        eventsHandler.onCameraCaptureSessionReady(cameraName);
+        eventsHandler.onCameraCaptureSessionReady(cameraCaptureSession);
       }
     }
 

@@ -30,6 +30,8 @@ import org.junit.runner.RunWith;
 import org.webrtc.CameraEnumerationAndroid.CaptureFormat;
 import org.webrtc.VideoFrame;
 
+import android.hardware.camera2.CameraCaptureSession;
+
 class CameraVideoCapturerTestFixtures {
   static final String TAG = "CameraVideoCapturerTestFixtures";
   // Default values used for starting capturing
@@ -197,6 +199,11 @@ class CameraVideoCapturerTestFixtures {
     private final Object cameraClosedLock = new Object();
     private boolean cameraClosed = true;
 
+    @Override
+    public void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession){
+      Logging.d(TAG, "onCameraCaptureSessionReady");
+    }
+    
     @Override
     public void onCameraError(String errorDescription) {
       Logging.w(TAG, "Camera error: " + errorDescription);
