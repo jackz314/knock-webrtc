@@ -4,6 +4,7 @@ install:
   - ./travis-install-webrtc-dep.sh
 script:
   - "cd tools_webrtc/android"
+  - "ls"
   - "chmod u+x build_arr.py"
   - "build_aar.py"
 before_deploy:
