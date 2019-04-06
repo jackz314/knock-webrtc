@@ -223,6 +223,7 @@ def BuildAar(archs, output_file, use_goma=False, extra_gn_args=None,
 
 
 def main():
+  logging.info("Starting the build...")
   args = _ParseArgs()
   logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
