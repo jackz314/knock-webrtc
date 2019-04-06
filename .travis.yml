@@ -1,10 +1,10 @@
 language: minimal
 install:
-  chmod u+x travis-install-webrtc-dep.sh
-  ./travis-install-webrtc-dep.sh
+  - chmod u+x travis-install-webrtc-dep.sh
+  - ./travis-install-webrtc-dep.sh
 script:
-  chmod u+x tools_webrtc/android/build_arr.py
-  tools_webrtc/android/build_arr.py
+  - chmod u+x tools_webrtc/android/build_arr.py
+  - tools_webrtc/android/build_arr.py
 before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
