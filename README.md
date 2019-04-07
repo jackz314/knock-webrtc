@@ -1,3 +1,10 @@
+# Knock WebRTC Library [![Build Status](https://travis-ci.com/jackz314/knock-webrtc.svg?token=phWsgHBzUvb6jweQrYva&branch=knock-branch)](https://travis-ci.com/jackz314/knock-webrtc)
+
+## This is a custom built WebRTC library based on the official one
+
+### Functionalities
+- Android Native API Camera control (Via [CameraCaptureSession](https://developer.android.com/reference/android/hardware/camera2/CameraCaptureSession.html))
+
 **WebRTC is a free, open software project** that provides browsers and mobile
 applications with Real-Time Communications (RTC) capabilities via simple APIs.
 The WebRTC components have been optimized to best serve this purpose.
