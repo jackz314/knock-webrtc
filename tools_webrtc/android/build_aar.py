@@ -8,7 +8,7 @@
 # in the file PATENTS.  All contributing project authors may
 # be found in the AUTHORS file in the root of the source tree.
 
-"""Script to generate libwebrtc.aar for distribution.
+"""Script to generate lib-knock-webrtc.aar for distribution.
 
 The script has to be run from the root src folder.
 ./tools_webrtc/android/build_aar.py
@@ -55,10 +55,10 @@ import find_depot_tools
 
 
 def _ParseArgs():
-  parser = argparse.ArgumentParser(description='libwebrtc.aar generator.')
+  parser = argparse.ArgumentParser(description='lib-knock-webrtc.aar generator.')
   parser.add_argument('--build-dir',
       help='Build dir. By default will create and use temporary dir.')
-  parser.add_argument('--output', default='libwebrtc.aar',
+  parser.add_argument('--output', default='lib-knock-webrtc.aar',
       help='Output file of the script.')
   parser.add_argument('--arch', default=DEFAULT_ARCHS, nargs='*',
       help='Architectures to build. Defaults to %(default)s.')

@@ -277,7 +277,7 @@ def ReleaseAar(use_goma, skip_tests, publish, build_dir):
       logging.info('Note: The library has not not been published automatically.'
                    ' Please do so manually if desired.')
   finally:
-    if use_tmp_dir:
+    if use_tmp_dir: #remove the temp folder if one is created
       shutil.rmtree(build_dir, True)
 
 

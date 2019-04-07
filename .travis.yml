@@ -24,7 +24,7 @@ before_deploy:
   - git config --local user.name "Jack Zhang"
   - git config --local user.email "zhangmengyu10@gmail.com"
   - export BUILD_NUM=$(./get-build-num.sh)
-  - git tag -a "AutoBuild-$BUILD_NUM" -m "Automatic Build $BUILD_NUM\n$(date +'%Y-%m-%d %H:%M:%S.%3N') - $(git log --format=%h -1)"
+  - git tag -a "AutoBuild-$BUILD_NUM" -m "Automatic Build $BUILD_NUM - $(date +'%Y-%m-%d %H:%M:%S.%3N') - $(git log --format=%h -1)"
 deploy:
   provider: releases
   on:
