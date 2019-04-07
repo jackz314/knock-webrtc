@@ -1,6 +1,6 @@
 #!/bin/bash
 # starts with correct tag info, increment build number
-LAST_TAG=$(git describe --tags --always)
+LAST_TAG=$(git describe --tags --abbrev=0 --always)
 if [ $LAST_TAG==AutoBuild-* ]
 then
     NEW_NUM=$((${LAST_TAG:10}+1)) #only keep the number and increment
