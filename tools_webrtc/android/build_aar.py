@@ -49,7 +49,7 @@ TARGETS = [
 sys.path.append(os.path.join(SCRIPT_DIR, '..', 'libs'))
 from generate_licenses import LicenseBuilder
 
-# sys.path.append(os.path.join(SRC_DIR, 'build'))
+sys.path.append(os.path.join(SRC_DIR, 'build'))
 import find_depot_tools
 
 
