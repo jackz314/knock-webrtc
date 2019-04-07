@@ -1,0 +1,2 @@
+git checkout 
+mvn org.apache.maven.plugins:maven-install-plugin:3.0.0-M1:install-file -DgroupId=com.jackz314 -DartifactId=knock-webrtc -Dversion=AutoBuild-$(./get-build-num.sh) -Dpackaging=aar -Dfile=lib-knock-webrtc.aar -DlocalRepositoryPath=./maven -DgeneratePom=true -DcreateChecksum=true
