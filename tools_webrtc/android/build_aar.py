@@ -33,6 +33,7 @@ import sys
 import tempfile
 import zipfile
 
+print("Preparing aar build...\n")
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(sys.argv[0]))
 SRC_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, os.pardir, os.pardir))
@@ -48,7 +49,7 @@ TARGETS = [
 sys.path.append(os.path.join(SCRIPT_DIR, '..', 'libs'))
 from generate_licenses import LicenseBuilder
 
-sys.path.append(os.path.join(SRC_DIR, 'build'))
+# sys.path.append(os.path.join(SRC_DIR, 'build'))
 import find_depot_tools
 
 
@@ -223,11 +224,10 @@ def BuildAar(archs, output_file, use_goma=False, extra_gn_args=None,
 
 
 def main():
-  sys.stdout.write("Starting aar build...\n")
-  sys.stdout.flush()
+  print("Starting aar build...\n")
   args = _ParseArgs()
-  logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
-  logging.basicConfig(stream=sys.stdout, level=logging.DEBUG if args.verbose else logging.INFO)
+  # logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
+  logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
   BuildAar(args.arch, args.output, args.use_goma, args.extra_gn_args,
            args.build_dir, args.extra_gn_switches, args.extra_ninja_switches)
