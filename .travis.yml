@@ -1,3 +1,4 @@
+if: tag IS blank #only build commits
 language: generic
 install:
   true
@@ -22,8 +23,8 @@ before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
   - git config --local user.email "zhangmengyu10@gmail.com"
-  - export TRAVIS_TAG=${TRAVIS_TAG:-$(date +'%Y%m%d%H%M%S')-$(git log --format=%h -1)}
-  - git tag $TRAVIS_TAG
+  - export BUILD_NUM=$(./get-build-num.sh)
+  - git tag -a "AutoBuild-$BUILD_NUM" -m "Automatic Build $BUILD_NUM\n$(date +'%Y-%m-%d %H:%M:%S.%3N') - $(git log --format=%h -1)"
 deploy:
   provider: releases
   on:
