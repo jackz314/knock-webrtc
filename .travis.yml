@@ -4,8 +4,8 @@ install:
   - ./travis-install-webrtc-dep.sh
 script:
   - mv `pwd` ../src #rename the current directory (repo root) to src so all the scripts work without problem
-  - sed -i -e "s|'src/resources'],|'src/resources'],'condition':'rtc_include_tests==true',|" src/DEPS
-  - gclient sync
+  # - sed -i -e "s|'src/resources'],|'src/resources'],'condition':'rtc_include_tests==true',|" src/DEPS # not get resources when gclient sync
+  # - gclient sync
   - chmod u+x tools_webrtc/android/build_aar.py
   - ./tools_webrtc/android/build_aar.py
 before_deploy:

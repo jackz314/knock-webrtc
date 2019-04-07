@@ -96,7 +96,7 @@ def FindSrcDirPath():
 SCRIPT_DIR = os.path.dirname(os.path.realpath(sys.argv[0]))
 WEBRTC_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, os.pardir, os.pardir))
 SRC_DIR = FindSrcDirPath()
-sys.path.append(os.path.join(SRC_DIR, 'build'))
+# sys.path.append(os.path.join(SRC_DIR, 'build'))
 import find_depot_tools
 
 THIRD_PARTY_LIB_SIMPLE_NAME_REGEX = r'^.*/third_party/([\w\-+]+).*$'
