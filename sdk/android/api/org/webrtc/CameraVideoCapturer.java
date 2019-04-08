@@ -27,9 +27,9 @@ public interface CameraVideoCapturer extends VideoCapturer {
    */
   public interface CameraEventsHandler {
 
-    //Called when camera capture session is ready
-    //exposes the control of camera to public
-    void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession);
+    //Called when camera control is ready
+    //returns either the camera 1 Instance or the cameraCaptureSession depending on the camera api used, the other unused variable will be null
+    void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession);
 
     // Camera error handler - invoked when camera can not be opened
     // or any camera exception happens on camera thread.

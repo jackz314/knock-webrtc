@@ -177,8 +177,8 @@ class Camera2Session implements CameraSession {
         captureRequestBuilder.addTarget(surface);
         session.setRepeatingRequest(
             captureRequestBuilder.build(), new CameraCaptureCallback()/*capture callbacks*/, cameraThreadHandler);
-        //expose camera capture session to public
-        events.onCameraCaptureSessionReady(session);
+        //camera finished initilizing and started running, expose camera capture session to public
+        events.onCameraControlReady(null, session);
       } catch (CameraAccessException e) {
         reportError("Failed to start capture request. " + e);
         return;

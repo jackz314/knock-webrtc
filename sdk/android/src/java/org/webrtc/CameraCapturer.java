@@ -102,11 +102,11 @@ abstract class CameraCapturer implements CameraVideoCapturer {
   private final CameraSession.Events cameraSessionEventsHandler = new CameraSession.Events() {
     
     @Override
-    public void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession){
+    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession){
       checkIsOnCameraThread();
       synchronized (stateLock) {
         //passing to upper level the exposed camera capture session
-        eventsHandler.onCameraCaptureSessionReady(cameraCaptureSession);
+        eventsHandler.onCameraControlReady(camera1Instance, cameraCaptureSession);
       }
     }
 
@@ -212,8 +212,8 @@ abstract class CameraCapturer implements CameraVideoCapturer {
     if (eventsHandler == null) {
       eventsHandler = new CameraEventsHandler() {
         @Override
-        public void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession) {
-          Logging.d(TAG, "Camera capture session ready but event handler wasn't specified, pass in call back handler in order to control camera");
+        public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession) {
+          Logging.d(TAG, "Camera control ready (is " + (cameraCaptureSession == null ? "not " : "") + "using camera2 API) but event handler wasn't specified, pass in call back handler in order to control camera");
         }
         @Override
         public void onCameraError(String errorDescription) {}

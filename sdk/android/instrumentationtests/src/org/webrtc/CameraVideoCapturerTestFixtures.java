@@ -200,8 +200,8 @@ class CameraVideoCapturerTestFixtures {
     private boolean cameraClosed = true;
 
     @Override
-    public void onCameraCaptureSessionReady(CameraCaptureSession cameraCaptureSession){
-      Logging.d(TAG, "onCameraCaptureSessionReady");
+    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession){
+      Logging.d(TAG, "onCameraControlReady, is " + (cameraCaptureSession == null ? "not " : "") + "using camera2 API");
     }
     
     @Override
