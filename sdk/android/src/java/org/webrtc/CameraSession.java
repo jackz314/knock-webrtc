@@ -15,6 +15,9 @@ import android.graphics.Matrix;
 import android.view.WindowManager;
 import android.view.Surface;
 
+
+import android.hardware.camera2.CameraCaptureSession;
+
 interface CameraSession {
   enum FailureType { ERROR, DISCONNECTED }
 
@@ -26,6 +29,8 @@ interface CameraSession {
 
   // Events are fired on the camera thread.
   interface Events {
+    //returns either the camera 1 Instance or the cameraCaptureSession depending on the camera api used, the other unused variable will be null
+    void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession);
     void onCameraOpening();
     void onCameraError(CameraSession session, String error);
     void onCameraDisconnected(CameraSession session);

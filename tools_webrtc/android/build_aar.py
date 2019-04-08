@@ -8,7 +8,7 @@
 # in the file PATENTS.  All contributing project authors may
 # be found in the AUTHORS file in the root of the source tree.
 
-"""Script to generate libwebrtc.aar for distribution.
+"""Script to generate lib-knock-webrtc.aar for distribution.
 
 The script has to be run from the root src folder.
 ./tools_webrtc/android/build_aar.py
@@ -33,6 +33,7 @@ import sys
 import tempfile
 import zipfile
 
+print("Preparing aar build...\n")
 
 SCRIPT_DIR = os.path.dirname(os.path.realpath(sys.argv[0]))
 SRC_DIR = os.path.normpath(os.path.join(SCRIPT_DIR, os.pardir, os.pardir))
@@ -54,10 +55,10 @@ import find_depot_tools
 
 
 def _ParseArgs():
-  parser = argparse.ArgumentParser(description='libwebrtc.aar generator.')
+  parser = argparse.ArgumentParser(description='lib-knock-webrtc.aar generator.')
   parser.add_argument('--build-dir',
       help='Build dir. By default will create and use temporary dir.')
-  parser.add_argument('--output', default='libwebrtc.aar',
+  parser.add_argument('--output', default='lib-knock-webrtc.aar',
       help='Output file of the script.')
   parser.add_argument('--arch', default=DEFAULT_ARCHS, nargs='*',
       help='Architectures to build. Defaults to %(default)s.')
@@ -223,7 +224,9 @@ def BuildAar(archs, output_file, use_goma=False, extra_gn_args=None,
 
 
 def main():
+  print("Starting aar build...\n")
   args = _ParseArgs()
+  # logging.getLogger().setLevel(logging.DEBUG if args.verbose else logging.INFO)
   logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
   BuildAar(args.arch, args.output, args.use_goma, args.extra_gn_args,

@@ -13,6 +13,8 @@ package org.webrtc;
 import android.media.MediaRecorder;
 import android.support.annotation.Nullable;
 
+import android.hardware.camera2.CameraCaptureSession;
+
 /**
  * Base interface for camera1 and camera2 implementations. Extends VideoCapturer with a
  * switchCamera() function. Also provides subinterfaces for handling camera events, and a helper
@@ -24,6 +26,11 @@ public interface CameraVideoCapturer extends VideoCapturer {
    * executed from an arbitrary thread.
    */
   public interface CameraEventsHandler {
+
+    //Called when camera control is ready
+    //returns either the camera 1 Instance or the cameraCaptureSession depending on the camera api used, the other unused variable will be null
+    void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession);
+
     // Camera error handler - invoked when camera can not be opened
     // or any camera exception happens on camera thread.
     void onCameraError(String errorDescription);
