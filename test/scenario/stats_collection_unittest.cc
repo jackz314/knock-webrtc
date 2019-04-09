@@ -7,6 +7,7 @@
  *  in the file PATENTS.  All contributing project authors may
  *  be found in the AUTHORS file in the root of the source tree.
  */
+#include "test/scenario/stats_collection.h"
 #include "test/gtest.h"
 #include "test/scenario/scenario.h"
 
@@ -40,7 +41,7 @@ TEST(ScenarioAnalyzerTest, PsnrIsHighWhenNetworkIsGood) {
   }
   // This is mainty a regression test, the target is based on previous runs and
   // might change due to changes in configuration and encoder etc.
-  EXPECT_GT(analyzer.stats().psnr.Mean(), 45);
+  EXPECT_GT(analyzer.stats().psnr.Mean(), 40);
 }
 
 TEST(ScenarioAnalyzerTest, PsnrIsLowWhenNetworkIsBad) {
@@ -55,7 +56,7 @@ TEST(ScenarioAnalyzerTest, PsnrIsLowWhenNetworkIsBad) {
   }
   // This is mainty a regression test, the target is based on previous runs and
   // might change due to changes in configuration and encoder etc.
-  EXPECT_LT(analyzer.stats().psnr.Mean(), 43);
+  EXPECT_LT(analyzer.stats().psnr.Mean(), 30);
 }
 }  // namespace test
 }  // namespace webrtc

@@ -9,8 +9,10 @@
  */
 #include <atomic>
 
-#include "test/scenario/scenario.h"
 #include "test/gtest.h"
+#include "test/scenario/scenario.h"
+#include "test/scenario/stats_collection.h"
+
 namespace webrtc {
 namespace test {
 TEST(ScenarioTest, StartsAndStopsWithoutErrors) {
@@ -83,7 +85,13 @@ void SetupVideoCall(Scenario& s, VideoQualityAnalyzer* analyzer) {
 }
 }  // namespace
 
-TEST(ScenarioTest, SimTimeEncoding) {
+// TODO(bugs.webrtc.org/10515): Remove this when performance has been improved.
+#if defined(WEBRTC_IOS) && defined(WEBRTC_ARCH_ARM64) && !defined(NDEBUG)
+#define MAYBE_SimTimeEncoding DISABLED_SimTimeEncoding
+#else
+#define MAYBE_SimTimeEncoding SimTimeEncoding
+#endif
+TEST(ScenarioTest, MAYBE_SimTimeEncoding) {
   VideoQualityAnalyzerConfig analyzer_config;
   analyzer_config.psnr_coverage = 0.1;
   VideoQualityAnalyzer analyzer(analyzer_config);
@@ -97,7 +105,13 @@ TEST(ScenarioTest, SimTimeEncoding) {
   EXPECT_EQ(analyzer.stats().lost_count, 0);
 }
 
-TEST(ScenarioTest, RealTimeEncoding) {
+// TODO(bugs.webrtc.org/10515): Remove this when performance has been improved.
+#if defined(WEBRTC_IOS) && defined(WEBRTC_ARCH_ARM64) && !defined(NDEBUG)
+#define MAYBE_RealTimeEncoding DISABLED_RealTimeEncoding
+#else
+#define MAYBE_RealTimeEncoding RealTimeEncoding
+#endif
+TEST(ScenarioTest, MAYBE_RealTimeEncoding) {
   VideoQualityAnalyzerConfig analyzer_config;
   analyzer_config.psnr_coverage = 0.1;
   VideoQualityAnalyzer analyzer(analyzer_config);

@@ -632,8 +632,8 @@ if (is_android) {
       "../../rtc_base",
       "../../rtc_base:checks",
       "../../rtc_base:rtc_task_queue",
-      "../../rtc_base:sequenced_task_checker",
       "../../rtc_base:weak_ptr",
+      "../../rtc_base/synchronization:sequence_checker",
       "../../system_wrappers:field_trial",
       "//third_party/abseil-cpp/absl/memory",
       "//third_party/libyuv",
@@ -785,6 +785,7 @@ if (is_android) {
 
   # JNI target for java_audio_device_module_java
   rtc_source_set("java_audio_device_module_jni") {
+    visibility = [ "*" ]
     sources = [
       "src/jni/audio_device/java_audio_device_module.cc",
     ]

@@ -63,6 +63,7 @@ std::vector<RtpStreamSender> CreateRtpStreamSenders(
     int rtcp_report_interval_ms,
     Transport* send_transport,
     RtcpIntraFrameObserver* intra_frame_callback,
+    RtcpLossNotificationObserver* rtcp_loss_notification_observer,
     RtcpBandwidthObserver* bandwidth_callback,
     RtpTransportControllerSendInterface* transport,
     RtcpRttStats* rtt_stats,
@@ -84,6 +85,8 @@ std::vector<RtpStreamSender> CreateRtpStreamSenders(
   configuration.receiver_only = false;
   configuration.outgoing_transport = send_transport;
   configuration.intra_frame_callback = intra_frame_callback;
+  configuration.rtcp_loss_notification_observer =
+      rtcp_loss_notification_observer;
   configuration.bandwidth_callback = bandwidth_callback;
   configuration.transport_feedback_callback =
       transport->transport_feedback_observer();
@@ -228,24 +231,26 @@ RtpVideoSender::RtpVideoSender(
       flexfec_sender_(
           MaybeCreateFlexfecSender(clock, rtp_config, suspended_ssrcs_)),
       fec_controller_(std::move(fec_controller)),
-      rtp_streams_(CreateRtpStreamSenders(clock,
-                                          rtp_config,
-                                          rtcp_report_interval_ms,
-                                          send_transport,
-                                          observers.intra_frame_callback,
-                                          transport->GetBandwidthObserver(),
-                                          transport,
-                                          observers.rtcp_rtt_stats,
-                                          flexfec_sender_.get(),
-                                          observers.bitrate_observer,
-                                          observers.rtcp_type_observer,
-                                          observers.send_delay_observer,
-                                          observers.send_packet_observer,
-                                          event_log,
-                                          retransmission_limiter,
-                                          this,
-                                          frame_encryptor,
-                                          crypto_options)),
+      rtp_streams_(
+          CreateRtpStreamSenders(clock,
+                                 rtp_config,
+                                 rtcp_report_interval_ms,
+                                 send_transport,
+                                 observers.intra_frame_callback,
+                                 observers.rtcp_loss_notification_observer,
+                                 transport->GetBandwidthObserver(),
+                                 transport,
+                                 observers.rtcp_rtt_stats,
+                                 flexfec_sender_.get(),
+                                 observers.bitrate_observer,
+                                 observers.rtcp_type_observer,
+                                 observers.send_delay_observer,
+                                 observers.send_packet_observer,
+                                 event_log,
+                                 retransmission_limiter,
+                                 this,
+                                 frame_encryptor,
+                                 crypto_options)),
       rtp_config_(rtp_config),
       transport_(transport),
       transport_overhead_bytes_per_packet_(0),
@@ -254,7 +259,7 @@ RtpVideoSender::RtpVideoSender(
       frame_counts_(rtp_config.ssrcs.size()),
       frame_count_observer_(observers.frame_count_observer) {
   RTC_DCHECK_EQ(rtp_config.ssrcs.size(), rtp_streams_.size());
-  module_process_thread_checker_.DetachFromThread();
+  module_process_thread_checker_.Detach();
   // SSRCs are assumed to be sorted in the same order as |rtp_modules|.
   for (uint32_t ssrc : rtp_config.ssrcs) {
     // Restore state if it previously existed.
@@ -738,6 +743,17 @@ uint32_t RtpVideoSender::GetPayloadBitrateBps() const {
 
 uint32_t RtpVideoSender::GetProtectionBitrateBps() const {
   return protection_bitrate_bps_;
+}
+
+absl::optional<RtpSequenceNumberMap::Info> RtpVideoSender::GetSentRtpPacketInfo(
+    uint32_t ssrc,
+    uint16_t seq_num) const {
+  for (const auto& rtp_stream : rtp_streams_) {
+    if (ssrc == rtp_stream.rtp_rtcp->SSRC()) {
+      return rtp_stream.sender_video->GetSentRtpPacketInfo(seq_num);
+    }
+  }
+  return absl::nullopt;
 }
 
 int RtpVideoSender::ProtectionRequest(const FecProtectionParams* delta_params,

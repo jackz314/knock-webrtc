@@ -228,7 +228,7 @@ rtc_source_set("platform_thread") {
     ":rtc_task_queue_libevent",
     ":rtc_task_queue_win",
     ":rtc_task_queue_stdlib",
-    ":sequenced_task_checker",
+    "synchronization:sequence_checker",
   ]
   sources = [
     "platform_thread.cc",
@@ -319,6 +319,7 @@ rtc_source_set("thread_checker") {
     "thread_checker.h",
   ]
   deps = [
+    ":deprecation",
     "synchronization:sequence_checker",
   ]
 }
@@ -479,6 +480,7 @@ rtc_source_set("rtc_task_queue") {
   deps = [
     ":macromagic",
     "../api/task_queue",
+    "../api/task_queue:global_task_queue_factory",
     "system:rtc_export",
     "task_utils:to_queued_task",
     "//third_party/abseil-cpp/absl/memory",
@@ -571,15 +573,6 @@ rtc_source_set("rtc_task_queue_stdlib") {
   ]
 }
 
-rtc_source_set("sequenced_task_checker") {
-  sources = [
-    "sequenced_task_checker.h",
-  ]
-  deps = [
-    "synchronization:sequence_checker",
-  ]
-}
-
 rtc_static_library("weak_ptr") {
   sources = [
     "weak_ptr.cc",
@@ -587,8 +580,8 @@ rtc_static_library("weak_ptr") {
   ]
   deps = [
     ":refcount",
-    ":sequenced_task_checker",
     "../api:scoped_refptr",
+    "synchronization:sequence_checker",
   ]
 }
 
@@ -1273,24 +1266,6 @@ if (rtc_include_tests) {
       ":rtc_base_tests_utils",
       ":rtc_task_queue",
       ":task_queue_for_test",
-      "../test:test_support",
-      "//third_party/abseil-cpp/absl/memory",
-    ]
-  }
-
-  rtc_source_set("sequenced_task_checker_unittests") {
-    testonly = true
-
-    sources = [
-      "sequenced_task_checker_unittest.cc",
-    ]
-    deps = [
-      ":checks",
-      ":rtc_base_approved",
-      ":rtc_base_tests_main",
-      ":sequenced_task_checker",
-      ":task_queue_for_test",
-      "../api:function_view",
       "../test:test_support",
       "//third_party/abseil-cpp/absl/memory",
     ]
