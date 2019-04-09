@@ -387,8 +387,19 @@ WebRtcVideoChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
     // Ensure frame dropping is always enabled.
     RTC_DCHECK(vp9_settings.frameDroppingOn);
     if (!is_screencast) {
-      // Limit inter-layer prediction to key pictures.
-      vp9_settings.interLayerPred = webrtc::InterLayerPredMode::kOnKeyPic;
+      const std::string group =
+          webrtc::field_trial::FindFullName("WebRTC-Vp9InterLayerPred");
+      int mode;
+      if (!group.empty() && sscanf(group.c_str(), "%d", &mode) == 1 &&
+          (mode == static_cast<int>(webrtc::InterLayerPredMode::kOn) ||
+           mode == static_cast<int>(webrtc::InterLayerPredMode::kOnKeyPic) ||
+           mode == static_cast<int>(webrtc::InterLayerPredMode::kOff))) {
+        vp9_settings.interLayerPred =
+            static_cast<webrtc::InterLayerPredMode>(mode);
+      } else {
+        // Limit inter-layer prediction to key pictures by default.
+        vp9_settings.interLayerPred = webrtc::InterLayerPredMode::kOnKeyPic;
+      }
     } else {
       // Multiple spatial layers vp9 screenshare needs flexible mode.
       vp9_settings.flexibleMode = vp9_settings.numberOfSpatialLayers > 1;
@@ -536,7 +547,7 @@ WebRtcVideoChannel::WebRtcVideoChannel(
               "WebRTC-Video-BufferPacketsWithUnknownSsrc")
               ? new UnhandledPacketsBuffer()
               : nullptr) {
-  RTC_DCHECK(thread_checker_.CalledOnValidThread());
+  RTC_DCHECK(thread_checker_.IsCurrent());
 
   rtcp_receiver_report_ssrc_ = kDefaultRtcpReceiverReportSsrc;
   sending_ = false;
@@ -1532,8 +1543,21 @@ void WebRtcVideoChannel::SetInterface(
   MediaChannel::SetInterface(iface, media_transport);
   // Set the RTP recv/send buffer to a bigger size.
 
+  // The group should be a positive integer with an explicit size, in
+  // which case that is used as UDP recevie buffer size. All other values shall
+  // result in the default value being used.
+  const std::string group_name =
+      webrtc::field_trial::FindFullName("WebRTC-IncreasedReceivebuffers");
+  int recv_buffer_size = kVideoRtpRecvBufferSize;
+  if (!group_name.empty() &&
+      (sscanf(group_name.c_str(), "%d", &recv_buffer_size) != 1 ||
+       recv_buffer_size <= 0)) {
+    RTC_LOG(LS_WARNING) << "Invalid receive buffer size: " << group_name;
+    recv_buffer_size = kVideoRtpRecvBufferSize;
+  }
+
   MediaChannel::SetOption(NetworkInterface::ST_RTP, rtc::Socket::OPT_RCVBUF,
-                          kVideoRtpRecvBufferSize);
+                          recv_buffer_size);
 
   // Speculative change to increase the outbound socket buffer size.
   // In b/15152257, we are seeing a significant number of packets discarded
@@ -2230,6 +2254,7 @@ VideoSenderInfo WebRtcVideoChannel::WebRtcVideoSendStream::GetVideoSenderInfo(
   info.avg_encode_ms = stats.avg_encode_time_ms;
   info.encode_usage_percent = stats.encode_usage_percent;
   info.frames_encoded = stats.frames_encoded;
+  info.total_encode_time_ms = stats.total_encode_time_ms;
   info.qp_sum = stats.qp_sum;
 
   info.nominal_bitrate = stats.media_bitrate_bps;

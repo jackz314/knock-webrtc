@@ -57,7 +57,7 @@
 #include "test/frame_generator.h"
 #include "test/gmock.h"
 
-using testing::Field;
+using ::testing::Field;
 using webrtc::BitrateConstraints;
 using webrtc::RtpExtension;
 
@@ -342,7 +342,7 @@ TEST_F(WebRtcVideoEngineTestWithGenericDescriptor,
 TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeCapturer) {
   // Allocate the source first to prevent early destruction before channel's
   // dtor is called.
-  testing::NiceMock<MockVideoSource> video_source;
+  ::testing::NiceMock<MockVideoSource> video_source;
 
   encoder_factory_->AddSupportedVideoCodecType("VP8");
 
@@ -360,19 +360,19 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeCapturer) {
 
   EXPECT_CALL(
       video_source,
-      AddOrUpdateSink(testing::_,
+      AddOrUpdateSink(::testing::_,
                       Field(&rtc::VideoSinkWants::rotation_applied, false)));
   // Set capturer.
   EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &video_source));
 
   // Verify capturer has turned off applying rotation.
-  testing::Mock::VerifyAndClear(&video_source);
+  ::testing::Mock::VerifyAndClear(&video_source);
 
   // Verify removing header extension turns on applying rotation.
   parameters.extensions.clear();
   EXPECT_CALL(
       video_source,
-      AddOrUpdateSink(testing::_,
+      AddOrUpdateSink(::testing::_,
                       Field(&rtc::VideoSinkWants::rotation_applied, true)));
 
   EXPECT_TRUE(channel->SetSendParameters(parameters));
@@ -381,7 +381,7 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeCapturer) {
 TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeAddSendStream) {
   // Allocate the source first to prevent early destruction before channel's
   // dtor is called.
-  testing::NiceMock<MockVideoSource> video_source;
+  ::testing::NiceMock<MockVideoSource> video_source;
 
   encoder_factory_->AddSupportedVideoCodecType("VP8");
 
@@ -399,13 +399,13 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionBeforeAddSendStream) {
   // Set source.
   EXPECT_CALL(
       video_source,
-      AddOrUpdateSink(testing::_,
+      AddOrUpdateSink(::testing::_,
                       Field(&rtc::VideoSinkWants::rotation_applied, false)));
   EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &video_source));
 }
 
 TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionAfterCapturer) {
-  testing::NiceMock<MockVideoSource> video_source;
+  ::testing::NiceMock<MockVideoSource> video_source;
 
   encoder_factory_->AddSupportedVideoCodecType("VP8");
   encoder_factory_->AddSupportedVideoCodecType("VP9");
@@ -417,12 +417,12 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionAfterCapturer) {
   // Set capturer.
   EXPECT_CALL(
       video_source,
-      AddOrUpdateSink(testing::_,
+      AddOrUpdateSink(::testing::_,
                       Field(&rtc::VideoSinkWants::rotation_applied, true)));
   EXPECT_TRUE(channel->SetVideoSend(kSsrc, nullptr, &video_source));
 
   // Verify capturer has turned on applying rotation.
-  testing::Mock::VerifyAndClear(&video_source);
+  ::testing::Mock::VerifyAndClear(&video_source);
 
   // Add CVO extension.
   const int id = 1;
@@ -435,18 +435,18 @@ TEST_F(WebRtcVideoEngineTest, CVOSetHeaderExtensionAfterCapturer) {
   parameters.codecs.erase(parameters.codecs.begin());
   EXPECT_CALL(
       video_source,
-      AddOrUpdateSink(testing::_,
+      AddOrUpdateSink(::testing::_,
                       Field(&rtc::VideoSinkWants::rotation_applied, false)));
   EXPECT_TRUE(channel->SetSendParameters(parameters));
 
   // Verify capturer has turned off applying rotation.
-  testing::Mock::VerifyAndClear(&video_source);
+  ::testing::Mock::VerifyAndClear(&video_source);
 
   // Verify removing header extension turns on applying rotation.
   parameters.extensions.clear();
   EXPECT_CALL(
       video_source,
-      AddOrUpdateSink(testing::_,
+      AddOrUpdateSink(::testing::_,
                       Field(&rtc::VideoSinkWants::rotation_applied, true)));
   EXPECT_TRUE(channel->SetSendParameters(parameters));
 }
@@ -710,11 +710,11 @@ void WebRtcVideoEngineTest::ExpectRtpCapabilitySupport(const char* uri,
   const RtpCapabilities capabilities = engine_.GetCapabilities();
   if (supported) {
     EXPECT_THAT(capabilities.header_extensions,
-                testing::Contains(testing::Field(&RtpExtension::uri, uri)));
+                ::testing::Contains(::testing::Field(&RtpExtension::uri, uri)));
   } else {
-    EXPECT_THAT(
-        capabilities.header_extensions,
-        testing::Each(testing::Field(&RtpExtension::uri, testing::StrNe(uri))));
+    EXPECT_THAT(capabilities.header_extensions,
+                ::testing::Each(::testing::Field(&RtpExtension::uri,
+                                                 ::testing::StrNe(uri))));
   }
 }
 
@@ -1053,7 +1053,7 @@ TEST(WebRtcVideoEngineNewVideoCodecFactoryTest, Vp8) {
   EXPECT_CALL(*rate_allocator_factory,
               CreateVideoBitrateAllocatorProxy(Field(
                   &webrtc::VideoCodec::codecType, webrtc::kVideoCodecVP8)))
-      .WillOnce(testing::Return(new webrtc::MockVideoBitrateAllocator()));
+      .WillOnce(::testing::Return(new webrtc::MockVideoBitrateAllocator()));
   WebRtcVideoEngine engine(
       (std::unique_ptr<webrtc::VideoEncoderFactory>(encoder_factory)),
       (std::unique_ptr<webrtc::VideoDecoderFactory>(decoder_factory)),
@@ -1062,7 +1062,7 @@ TEST(WebRtcVideoEngineNewVideoCodecFactoryTest, Vp8) {
   const webrtc::SdpVideoFormat vp8_format("VP8");
   const std::vector<webrtc::SdpVideoFormat> supported_formats = {vp8_format};
   EXPECT_CALL(*encoder_factory, GetSupportedFormats())
-      .WillRepeatedly(testing::Return(supported_formats));
+      .WillRepeatedly(::testing::Return(supported_formats));
 
   // Verify the codecs from the engine.
   const std::vector<VideoCodec> engine_codecs = engine.codecs();
@@ -1101,7 +1101,7 @@ TEST(WebRtcVideoEngineNewVideoCodecFactoryTest, Vp8) {
   codec_info.has_internal_source = false;
   const webrtc::SdpVideoFormat format("VP8");
   EXPECT_CALL(*encoder_factory, QueryVideoEncoder(format))
-      .WillRepeatedly(testing::Return(codec_info));
+      .WillRepeatedly(::testing::Return(codec_info));
   FakeWebRtcVideoEncoder* const encoder = new FakeWebRtcVideoEncoder(nullptr);
   rtc::Event encoder_created;
   EXPECT_CALL(*encoder_factory, CreateVideoEncoderProxy(format))
@@ -1113,7 +1113,7 @@ TEST(WebRtcVideoEngineNewVideoCodecFactoryTest, Vp8) {
   // Mock decoder creation. |engine| take ownership of the decoder.
   FakeWebRtcVideoDecoder* const decoder = new FakeWebRtcVideoDecoder(nullptr);
   EXPECT_CALL(*decoder_factory, CreateVideoDecoderProxy(format))
-      .WillOnce(testing::Return(decoder));
+      .WillOnce(::testing::Return(decoder));
 
   // Create a call.
   webrtc::RtcEventLogNullImpl event_log;
@@ -1176,11 +1176,11 @@ TEST(WebRtcVideoEngineNewVideoCodecFactoryTest, NullDecoder) {
   const webrtc::SdpVideoFormat vp8_format("VP8");
   const std::vector<webrtc::SdpVideoFormat> supported_formats = {vp8_format};
   EXPECT_CALL(*encoder_factory, GetSupportedFormats())
-      .WillRepeatedly(testing::Return(supported_formats));
+      .WillRepeatedly(::testing::Return(supported_formats));
 
   // Decoder creation fails.
-  EXPECT_CALL(*decoder_factory, CreateVideoDecoderProxy(testing::_))
-      .WillOnce(testing::Return(nullptr));
+  EXPECT_CALL(*decoder_factory, CreateVideoDecoderProxy(::testing::_))
+      .WillOnce(::testing::Return(nullptr));
 
   // Create a call.
   webrtc::RtcEventLogNullImpl event_log;
@@ -1261,7 +1261,7 @@ TEST_F(WebRtcVideoEngineTest, DISABLED_RecreatesEncoderOnContentTypeChange) {
   EXPECT_EQ(0u, encoder_factory_->encoders().size());
 }
 
-class WebRtcVideoChannelBaseTest : public testing::Test {
+class WebRtcVideoChannelBaseTest : public ::testing::Test {
  protected:
   WebRtcVideoChannelBaseTest()
       : engine_(webrtc::CreateBuiltinVideoEncoderFactory(),
@@ -1495,6 +1495,59 @@ TEST_F(WebRtcVideoChannelBaseTest, SetSendSetsTransportBufferSizes) {
   EXPECT_TRUE(SetSend(true));
   EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
   EXPECT_EQ(256 * 1024, network_interface_.recvbuf_size());
+}
+
+// Test that we properly set the send and recv buffer sizes when overriding
+// via field trials.
+TEST_F(WebRtcVideoChannelBaseTest, OverridesRecvBufferSize) {
+  // Set field trial to override the default recv buffer size, and then re-run
+  // setup where the interface is created and configured.
+  const int kCustomRecvBufferSize = 123456;
+  webrtc::test::ScopedFieldTrials field_trial(
+      "WebRTC-IncreasedReceivebuffers/123456/");
+  SetUp();
+
+  EXPECT_TRUE(SetOneCodec(DefaultCodec()));
+  EXPECT_TRUE(SetSend(true));
+  EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
+  EXPECT_EQ(kCustomRecvBufferSize, network_interface_.recvbuf_size());
+}
+
+// Test that we properly set the send and recv buffer sizes when overriding
+// via field trials with suffix.
+TEST_F(WebRtcVideoChannelBaseTest, OverridesRecvBufferSizeWithSuffix) {
+  // Set field trial to override the default recv buffer size, and then re-run
+  // setup where the interface is created and configured.
+  const int kCustomRecvBufferSize = 123456;
+  webrtc::test::ScopedFieldTrials field_trial(
+      "WebRTC-IncreasedReceivebuffers/123456_Dogfood/");
+  SetUp();
+
+  EXPECT_TRUE(SetOneCodec(DefaultCodec()));
+  EXPECT_TRUE(SetSend(true));
+  EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
+  EXPECT_EQ(kCustomRecvBufferSize, network_interface_.recvbuf_size());
+}
+
+// Test that we properly set the send and recv buffer sizes when overriding
+// via field trials that don't make any sense.
+TEST_F(WebRtcVideoChannelBaseTest, InvalidRecvBufferSize) {
+  // Set bogus field trial values to override the default recv buffer size, and
+  // then re-run setup where the interface is created and configured. The
+  // default value should still be used.
+
+  for (std::string group : {" ", "NotANumber", "-1", "0"}) {
+    std::string field_trial_string = "WebRTC-IncreasedReceivebuffers/";
+    field_trial_string += group;
+    field_trial_string += "/";
+    webrtc::test::ScopedFieldTrials field_trial(field_trial_string);
+    SetUp();
+
+    EXPECT_TRUE(SetOneCodec(DefaultCodec()));
+    EXPECT_TRUE(SetSend(true));
+    EXPECT_EQ(64 * 1024, network_interface_.sendbuf_size());
+    EXPECT_EQ(256 * 1024, network_interface_.recvbuf_size());
+  }
 }
 
 // Test that stats work properly for a 1-1 call.
@@ -3143,13 +3196,20 @@ TEST_F(Vp9SettingsTest, AllEncodingParametersCopied) {
   EXPECT_TRUE(encoder_config.simulcast_layers[2].active);
 }
 
-class Vp9SettingsTestWithFieldTrial : public Vp9SettingsTest {
- public:
-  explicit Vp9SettingsTestWithFieldTrial(const char* field_trials)
-      : Vp9SettingsTest(field_trials) {}
-
+class Vp9SettingsTestWithFieldTrial
+    : public Vp9SettingsTest,
+      public ::testing::WithParamInterface<
+          ::testing::tuple<const char*, int, int, webrtc::InterLayerPredMode>> {
  protected:
-  void VerifySettings(int num_spatial_layers, int num_temporal_layers) {
+  Vp9SettingsTestWithFieldTrial()
+      : Vp9SettingsTest(::testing::get<0>(GetParam())),
+        num_spatial_layers_(::testing::get<1>(GetParam())),
+        num_temporal_layers_(::testing::get<2>(GetParam())),
+        inter_layer_pred_(::testing::get<3>(GetParam())) {}
+
+  void VerifySettings(int num_spatial_layers,
+                      int num_temporal_layers,
+                      webrtc::InterLayerPredMode interLayerPred) {
     cricket::VideoSendParameters parameters;
     parameters.codecs.push_back(GetEngineCodec("VP9"));
     ASSERT_TRUE(channel_->SetSendParameters(parameters));
@@ -3166,46 +3226,45 @@ class Vp9SettingsTestWithFieldTrial : public Vp9SettingsTest {
     ASSERT_TRUE(stream->GetVp9Settings(&vp9_settings)) << "No VP9 config set.";
     EXPECT_EQ(num_spatial_layers, vp9_settings.numberOfSpatialLayers);
     EXPECT_EQ(num_temporal_layers, vp9_settings.numberOfTemporalLayers);
+    EXPECT_EQ(inter_layer_pred_, vp9_settings.interLayerPred);
 
     EXPECT_TRUE(channel_->SetVideoSend(last_ssrc_, nullptr, nullptr));
   }
+
+  const uint8_t num_spatial_layers_;
+  const uint8_t num_temporal_layers_;
+  const webrtc::InterLayerPredMode inter_layer_pred_;
 };
 
-class Vp9SettingsTestWithNoFlag : public Vp9SettingsTestWithFieldTrial {
- public:
-  Vp9SettingsTestWithNoFlag() : Vp9SettingsTestWithFieldTrial("") {}
-};
-
-TEST_F(Vp9SettingsTestWithNoFlag, VerifySettings) {
-  const int kNumSpatialLayers = 1;
-  const int kNumTemporalLayers = 1;
-  VerifySettings(kNumSpatialLayers, kNumTemporalLayers);
+TEST_P(Vp9SettingsTestWithFieldTrial, VerifyCodecSettings) {
+  VerifySettings(num_spatial_layers_, num_temporal_layers_, inter_layer_pred_);
 }
 
-class Vp9SettingsTestWithInvalidFlag : public Vp9SettingsTestWithFieldTrial {
- public:
-  Vp9SettingsTestWithInvalidFlag()
-      : Vp9SettingsTestWithFieldTrial("WebRTC-SupportVP9SVC/Default/") {}
-};
-
-TEST_F(Vp9SettingsTestWithInvalidFlag, VerifySettings) {
-  const int kNumSpatialLayers = 1;
-  const int kNumTemporalLayers = 1;
-  VerifySettings(kNumSpatialLayers, kNumTemporalLayers);
-}
-
-class Vp9SettingsTestWith2SL3TLFlag : public Vp9SettingsTestWithFieldTrial {
- public:
-  Vp9SettingsTestWith2SL3TLFlag()
-      : Vp9SettingsTestWithFieldTrial(
-            "WebRTC-SupportVP9SVC/EnabledByFlag_2SL3TL/") {}
-};
-
-TEST_F(Vp9SettingsTestWith2SL3TLFlag, VerifySettings) {
-  const int kNumSpatialLayers = 2;
-  const int kNumTemporalLayers = 3;
-  VerifySettings(kNumSpatialLayers, kNumTemporalLayers);
-}
+INSTANTIATE_TEST_SUITE_P(
+    ,
+    Vp9SettingsTestWithFieldTrial,
+    ::testing::Values(
+        std::make_tuple("", 1, 1, webrtc::InterLayerPredMode::kOnKeyPic),
+        std::make_tuple("WebRTC-SupportVP9SVC/Default/",
+                        1,
+                        1,
+                        webrtc::InterLayerPredMode::kOnKeyPic),
+        std::make_tuple("WebRTC-SupportVP9SVC/EnabledByFlag_2SL3TL/",
+                        2,
+                        3,
+                        webrtc::InterLayerPredMode::kOnKeyPic),
+        std::make_tuple("WebRTC-Vp9InterLayerPred/0/",
+                        1,
+                        1,
+                        webrtc::InterLayerPredMode::kOff),
+        std::make_tuple("WebRTC-Vp9InterLayerPred/1/",
+                        1,
+                        1,
+                        webrtc::InterLayerPredMode::kOn),
+        std::make_tuple("WebRTC-Vp9InterLayerPred/2/",
+                        1,
+                        1,
+                        webrtc::InterLayerPredMode::kOnKeyPic)));
 
 TEST_F(WebRtcVideoChannelTest, VerifyMinBitrate) {
   std::vector<webrtc::VideoStream> streams = AddSendStream()->GetVideoStreams();
@@ -7054,7 +7113,7 @@ TEST_F(WebRtcVideoChannelTest, ConfiguresLocalSsrcOnExistingReceivers) {
   TestReceiverLocalSsrcConfiguration(true);
 }
 
-class WebRtcVideoChannelSimulcastTest : public testing::Test {
+class WebRtcVideoChannelSimulcastTest : public ::testing::Test {
  public:
   WebRtcVideoChannelSimulcastTest()
       : fake_call_(),

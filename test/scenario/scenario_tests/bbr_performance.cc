@@ -101,7 +101,6 @@ struct CallTestConfig {
     if (tuning.use_bbr) {
       trials +=
           "WebRTC-BweCongestionController/Enabled,BBR/"
-          "WebRTC-PacerPushbackExperiment/Enabled/"
           "WebRTC-Pacer-DrainQueue/Disabled/"
           "WebRTC-Pacer-PadInSilence/Enabled/"
           "WebRTC-Pacer-BlockAudio/Disabled/"
@@ -132,7 +131,7 @@ struct CallTestConfig {
 }  // namespace
 class BbrScenarioTest
     : public ::testing::Test,
-      public testing::WithParamInterface<tuple<std::string, std::string>> {
+      public ::testing::WithParamInterface<tuple<std::string, std::string>> {
  public:
   BbrScenarioTest() {
     conf_.Parse(::testing::get<0>(GetParam()), ::testing::get<1>(GetParam()));

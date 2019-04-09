@@ -38,9 +38,9 @@
 #include "rtc_base/logging.h"
 #include "rtc_base/time_utils.h"
 
-using testing::AtLeast;
-using testing::Invoke;
-using testing::Return;
+using ::testing::AtLeast;
+using ::testing::Invoke;
+using ::testing::Return;
 
 namespace webrtc {
 
@@ -496,7 +496,7 @@ class RTCStatsCollectorWrapper {
   rtc::scoped_refptr<RTCStatsCollector> stats_collector_;
 };
 
-class RTCStatsCollectorTest : public testing::Test {
+class RTCStatsCollectorTest : public ::testing::Test {
  public:
   RTCStatsCollectorTest()
       : pc_(new rtc::RefCountedObject<FakePeerConnectionForStats>()),
@@ -1684,6 +1684,7 @@ TEST_F(RTCStatsCollectorTest, CollectRTCInboundRTPStreamStats_Video) {
   video_media_info.receivers[0].nacks_sent = 7;
   video_media_info.receivers[0].frames_decoded = 8;
   video_media_info.receivers[0].qp_sum = absl::nullopt;
+  video_media_info.receivers[0].content_type = VideoContentType::UNSPECIFIED;
 
   RtpCodecParameters codec_parameters;
   codec_parameters.payload_type = 42;
@@ -1718,6 +1719,7 @@ TEST_F(RTCStatsCollectorTest, CollectRTCInboundRTPStreamStats_Video) {
   expected_video.fraction_lost = 4.5;
   expected_video.frames_decoded = 8;
   // |expected_video.qp_sum| should be undefined.
+  // |expected_video.content_type| should be undefined.
 
   ASSERT_TRUE(report->Get(expected_video.id()));
   EXPECT_EQ(
@@ -1727,6 +1729,8 @@ TEST_F(RTCStatsCollectorTest, CollectRTCInboundRTPStreamStats_Video) {
   // Set previously undefined values and "GetStats" again.
   video_media_info.receivers[0].qp_sum = 9;
   expected_video.qp_sum = 9;
+  video_media_info.receivers[0].content_type = VideoContentType::SCREENSHARE;
+  expected_video.content_type = "screenshare";
   video_media_channel->SetStats(video_media_info);
 
   report = stats_->GetFreshStatsReport();
@@ -1804,7 +1808,9 @@ TEST_F(RTCStatsCollectorTest, CollectRTCOutboundRTPStreamStats_Video) {
   video_media_info.senders[0].bytes_sent = 6;
   video_media_info.senders[0].codec_payload_type = 42;
   video_media_info.senders[0].frames_encoded = 8;
+  video_media_info.senders[0].total_encode_time_ms = 9000;
   video_media_info.senders[0].qp_sum = absl::nullopt;
+  video_media_info.senders[0].content_type = VideoContentType::UNSPECIFIED;
 
   RtpCodecParameters codec_parameters;
   codec_parameters.payload_type = 42;
@@ -1841,6 +1847,8 @@ TEST_F(RTCStatsCollectorTest, CollectRTCOutboundRTPStreamStats_Video) {
   expected_video.packets_sent = 5;
   expected_video.bytes_sent = 6;
   expected_video.frames_encoded = 8;
+  expected_video.total_encode_time = 9.0;
+  // |expected_video.content_type| should be undefined.
   // |expected_video.qp_sum| should be undefined.
   ASSERT_TRUE(report->Get(expected_video.id()));
 
@@ -1851,6 +1859,8 @@ TEST_F(RTCStatsCollectorTest, CollectRTCOutboundRTPStreamStats_Video) {
   // Set previously undefined values and "GetStats" again.
   video_media_info.senders[0].qp_sum = 9;
   expected_video.qp_sum = 9;
+  video_media_info.senders[0].content_type = VideoContentType::SCREENSHARE;
+  expected_video.content_type = "screenshare";
   video_media_channel->SetStats(video_media_info);
 
   report = stats_->GetFreshStatsReport();
