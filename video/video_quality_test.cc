@@ -325,6 +325,7 @@ VideoQualityTest::VideoQualityTest(
     std::unique_ptr<InjectionComponents> injection_components)
     : clock_(Clock::GetRealTimeClock()),
       task_queue_factory_(CreateDefaultTaskQueueFactory()),
+      rtc_event_log_factory_(task_queue_factory_.get()),
       video_decoder_factory_([this](const SdpVideoFormat& format) {
         return this->CreateVideoDecoder(format);
       }),
@@ -1177,8 +1178,10 @@ void VideoQualityTest::RunWithAnalyzer(const Params& params) {
   }
 
   if (!params.logging.rtc_event_log_name.empty()) {
-    send_event_log_ = RtcEventLog::Create(RtcEventLog::EncodingType::Legacy);
-    recv_event_log_ = RtcEventLog::Create(RtcEventLog::EncodingType::Legacy);
+    send_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
+        RtcEventLog::EncodingType::Legacy);
+    recv_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
+        RtcEventLog::EncodingType::Legacy);
     std::unique_ptr<RtcEventLogOutputFile> send_output(
         absl::make_unique<RtcEventLogOutputFile>(
             params.logging.rtc_event_log_name + "_send",
@@ -1198,11 +1201,13 @@ void VideoQualityTest::RunWithAnalyzer(const Params& params) {
     recv_event_log_ = RtcEventLog::CreateNull();
   }
 
-  task_queue_.SendTask([this, &params, &send_transport, &recv_transport]() {
-    Call::Config send_call_config(send_event_log_.get());
-    Call::Config recv_call_config(recv_event_log_.get());
-    send_call_config.bitrate_config = params.call.call_bitrate_config;
-    recv_call_config.bitrate_config = params.call.call_bitrate_config;
+  Call::Config send_call_config(send_event_log_.get());
+  Call::Config recv_call_config(recv_event_log_.get());
+  send_call_config.bitrate_config = params.call.call_bitrate_config;
+  recv_call_config.bitrate_config = params.call.call_bitrate_config;
+
+  task_queue_.SendTask([this, &send_call_config, &recv_call_config,
+                        &send_transport, &recv_transport]() {
     if (params_.audio.enabled)
       InitializeAudioDevice(&send_call_config, &recv_call_config,
                             params_.audio.use_real_adm);
@@ -1227,8 +1232,7 @@ void VideoQualityTest::RunWithAnalyzer(const Params& params) {
       kSendRtxSsrcs[params_.ss[0].selected_stream],
       static_cast<size_t>(params_.ss[0].selected_stream),
       params.ss[0].selected_sl, params_.video[0].selected_tl,
-      is_quick_test_enabled, clock_, params_.logging.rtp_dump_name,
-      &task_queue_);
+      is_quick_test_enabled, clock_, params_.logging.rtp_dump_name);
 
   task_queue_.SendTask([&]() {
     analyzer_->SetCall(sender_call_.get());
@@ -1396,8 +1400,10 @@ void VideoQualityTest::RunWithRenderers(const Params& params) {
   std::vector<std::unique_ptr<test::VideoRenderer>> loopback_renderers;
 
   if (!params.logging.rtc_event_log_name.empty()) {
-    send_event_log_ = RtcEventLog::Create(RtcEventLog::EncodingType::Legacy);
-    recv_event_log_ = RtcEventLog::Create(RtcEventLog::EncodingType::Legacy);
+    send_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
+        RtcEventLog::EncodingType::Legacy);
+    recv_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
+        RtcEventLog::EncodingType::Legacy);
     std::unique_ptr<RtcEventLogOutputFile> send_output(
         absl::make_unique<RtcEventLogOutputFile>(
             params.logging.rtc_event_log_name + "_send",

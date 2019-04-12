@@ -44,7 +44,6 @@ class TestVideoReceiver : public ::testing::Test {
     const size_t kMaxNackListSize = 250;
     const int kMaxPacketAgeToNack = 450;
     receiver_.SetNackSettings(kMaxNackListSize, kMaxPacketAgeToNack, 0);
-    EXPECT_EQ(0, receiver_.SetVideoProtection(kProtectionNack, true));
     EXPECT_EQ(
         0, receiver_.RegisterPacketRequestCallback(&packet_request_callback_));
 
@@ -75,7 +74,7 @@ class TestVideoReceiver : public ::testing::Test {
       ++header->header.sequenceNumber;
     }
     receiver_.Process();
-    EXPECT_CALL(decoder_, Decode(_, _, _, _)).Times(0);
+    EXPECT_CALL(decoder_, Decode(_, _, _)).Times(0);
     EXPECT_EQ(VCM_FRAME_NOT_READY, receiver_.Decode(kMaxWaitTimeMs));
   }
 
@@ -87,7 +86,7 @@ class TestVideoReceiver : public ::testing::Test {
     EXPECT_CALL(packet_request_callback_, ResendPackets(_, _)).Times(0);
 
     receiver_.Process();
-    EXPECT_CALL(decoder_, Decode(_, _, _, _)).Times(1);
+    EXPECT_CALL(decoder_, Decode(_, _, _)).Times(1);
     EXPECT_EQ(0, receiver_.Decode(kMaxWaitTimeMs));
   }
 
