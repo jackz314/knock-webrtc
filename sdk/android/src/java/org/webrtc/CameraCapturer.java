@@ -17,6 +17,7 @@ import android.support.annotation.Nullable;
 import java.util.Arrays;
 
 import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraDevice;
 
 @SuppressWarnings("deprecation")
 abstract class CameraCapturer implements CameraVideoCapturer {
@@ -102,11 +103,11 @@ abstract class CameraCapturer implements CameraVideoCapturer {
   private final CameraSession.Events cameraSessionEventsHandler = new CameraSession.Events() {
     
     @Override
-    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession){
+    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevcie cameraDevice){
       checkIsOnCameraThread();
       synchronized (stateLock) {
         //passing to upper level the exposed camera capture session
-        eventsHandler.onCameraControlReady(camera1Instance, cameraCaptureSession);
+        eventsHandler.onCameraControlReady(camera1Instance, cameraCaptureSession, cameraDevice);
       }
     }
 
@@ -212,7 +213,7 @@ abstract class CameraCapturer implements CameraVideoCapturer {
     if (eventsHandler == null) {
       eventsHandler = new CameraEventsHandler() {
         @Override
-        public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession) {
+        public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice) {
           Logging.d(TAG, "Camera control ready (is " + (cameraCaptureSession == null ? "not " : "") + "using camera2 API) but event handler wasn't specified, pass in call back handler in order to control camera");
         }
         @Override

@@ -228,7 +228,7 @@ class Camera1Session implements CameraSession {
       events.onCameraError(this, e.getMessage());
     }
     //camera finally finished initilizing and started running, pass back camera instance
-    events.onCameraControlReady(camera, null);
+    events.onCameraControlReady(camera, null, null);
   }
 
   private void stopInternal() {
