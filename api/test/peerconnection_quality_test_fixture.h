@@ -167,6 +167,9 @@ class PeerConnectionE2EQualityTestFixture {
     // If is set, an RTCEventLog will be saved in that location and it will be
     // available for further analysis.
     virtual PeerConfigurer* SetRtcEventLogPath(std::string path) = 0;
+    // If is set, an AEC dump will be saved in that location and it will be
+    // available for further analysis.
+    virtual PeerConfigurer* SetAecDumpPath(std::string path) = 0;
     virtual PeerConfigurer* SetRTCConfiguration(
         PeerConnectionInterface::RTCConfiguration configuration) = 0;
   };
@@ -186,7 +189,7 @@ class PeerConnectionE2EQualityTestFixture {
     // used to emulate overshooting of video encoders. This multiplier will
     // be applied for all video encoder on both sides for all layers. Bitrate
     // estimated by WebRTC stack will be multiplied on this multiplier and then
-    // provided into VideoEncoder::SetRateAllocation(...).
+    // provided into VideoEncoder::SetRates(...).
     double video_encoder_bitrate_multiplier = 1.0;
   };
 

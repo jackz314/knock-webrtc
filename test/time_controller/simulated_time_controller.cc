@@ -312,18 +312,6 @@ std::unique_ptr<ProcessThread> SimulatedTimeControllerImpl::CreateProcessThread(
   return process_thread;
 }
 
-std::vector<SimulatedSequenceRunner*>
-SimulatedTimeControllerImpl::GetNextReadyRunner(Timestamp current_time) {
-  rtc::CritScope lock(&lock_);
-  std::vector<SimulatedSequenceRunner*> ready;
-  for (auto* runner : runners_) {
-    if (yielded_.find(runner) == yielded_.end() &&
-        runner->GetNextRunTime() <= current_time) {
-      ready.push_back(runner);
-    }
-  }
-  return ready;
-}
 
 void SimulatedTimeControllerImpl::YieldExecution() {
   if (rtc::CurrentThreadId() == thread_id_) {
@@ -347,16 +335,31 @@ void SimulatedTimeControllerImpl::YieldExecution() {
 
 void SimulatedTimeControllerImpl::RunReadyRunners() {
   RTC_DCHECK_RUN_ON(&thread_checker_);
+  rtc::CritScope lock(&lock_);
   RTC_DCHECK_EQ(rtc::CurrentThreadId(), thread_id_);
   Timestamp current_time = CurrentTime();
+  // Clearing |ready_runners_| in case this is a recursive call:
+  // RunReadyRunners -> Run -> Event::Wait -> Yield ->RunReadyRunners
+  ready_runners_.clear();
+
   // We repeat until we have no ready left to handle tasks posted by ready
   // runners.
   while (true) {
-    auto ready = GetNextReadyRunner(current_time);
-    if (ready.empty())
-      break;
-    for (auto* runner : ready) {
+    for (auto* runner : runners_) {
+      if (yielded_.find(runner) == yielded_.end() &&
+          runner->GetNextRunTime() <= current_time) {
+        ready_runners_.push_back(runner);
+      }
+    }
+    if (ready_runners_.empty())
+      return;
+    while (!ready_runners_.empty()) {
+      auto* runner = ready_runners_.front();
+      ready_runners_.pop_front();
       runner->UpdateReady(current_time);
+      // Note that the Run function might indirectly cause a call to
+      // Unregister() which will recursively grab |lock_| again to remove items
+      // from |ready_runners_|.
       runner->Run(current_time);
     }
   }
@@ -382,7 +385,7 @@ Timestamp SimulatedTimeControllerImpl::NextRunTime() const {
 
 void SimulatedTimeControllerImpl::AdvanceTime(Timestamp target_time) {
   rtc::CritScope time_lock(&time_lock_);
-  RTC_DCHECK(target_time >= current_time_);
+  RTC_DCHECK_GE(target_time, current_time_);
   current_time_ = target_time;
 }
 
@@ -390,6 +393,7 @@ void SimulatedTimeControllerImpl::Unregister(SimulatedSequenceRunner* runner) {
   rtc::CritScope lock(&lock_);
   bool removed = RemoveByValue(runners_, runner);
   RTC_CHECK(removed);
+  RemoveByValue(ready_runners_, runner);
 }
 
 }  // namespace sim_time_impl
