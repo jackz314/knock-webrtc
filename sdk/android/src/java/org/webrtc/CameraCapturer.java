@@ -103,7 +103,7 @@ abstract class CameraCapturer implements CameraVideoCapturer {
   private final CameraSession.Events cameraSessionEventsHandler = new CameraSession.Events() {
     
     @Override
-    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevcie cameraDevice){
+    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice){
       checkIsOnCameraThread();
       synchronized (stateLock) {
         //passing to upper level the exposed camera capture session
