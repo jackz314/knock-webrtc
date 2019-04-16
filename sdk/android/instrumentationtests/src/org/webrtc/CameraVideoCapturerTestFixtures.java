@@ -32,6 +32,7 @@ import org.webrtc.VideoFrame;
 
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CaptureRequest;
 
 class CameraVideoCapturerTestFixtures {
   static final String TAG = "CameraVideoCapturerTestFixtures";
@@ -201,7 +202,7 @@ class CameraVideoCapturerTestFixtures {
     private boolean cameraClosed = true;
 
     @Override
-    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice){
+    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice, CaptureRequest.Builder captureRequestBuilder){
       Logging.d(TAG, "onCameraControlReady, is " + (cameraCaptureSession == null ? "not " : "") + "using camera2 API");
     }
     

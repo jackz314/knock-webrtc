@@ -15,6 +15,7 @@ import android.support.annotation.Nullable;
 
 import android.hardware.camera2.CameraCaptureSession;
 import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CaptureRequest;
 
 /**
  * Base interface for camera1 and camera2 implementations. Extends VideoCapturer with a
@@ -30,7 +31,7 @@ public interface CameraVideoCapturer extends VideoCapturer {
 
     //Called when camera control is ready
     //returns either the camera 1 Instance or the cameraCaptureSession depending on the camera api used, the other unused variable will be null
-    void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice);
+    void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice, CaptureRequest.Builder captureRequestBuilder);
 
     // Camera error handler - invoked when camera can not be opened
     // or any camera exception happens on camera thread.
