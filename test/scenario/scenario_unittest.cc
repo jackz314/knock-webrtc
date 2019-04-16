@@ -23,7 +23,7 @@ TEST(ScenarioTest, StartsAndStopsWithoutErrors) {
   call_client_config.transport.rates.start_rate = DataRate::kbps(300);
   auto* alice = s.CreateClient("alice", call_client_config);
   auto* bob = s.CreateClient("bob", call_client_config);
-  NetworkNodeConfig network_config;
+  NetworkSimulationConfig network_config;
   auto alice_net = s.CreateSimulationNode(network_config);
   auto bob_net = s.CreateSimulationNode(network_config);
   auto route = s.CreateRoutes(alice, {alice_net}, bob, {bob_net});
@@ -40,8 +40,9 @@ TEST(ScenarioTest, StartsAndStopsWithoutErrors) {
   s.CreateAudioStream(route->forward(), audio_stream_config);
   s.CreateAudioStream(route->reverse(), audio_stream_config);
 
-  CrossTrafficConfig cross_traffic_config;
-  s.CreateCrossTraffic({alice_net}, cross_traffic_config);
+  RandomWalkConfig cross_traffic_config;
+  s.net()->CreateRandomWalkCrossTraffic(
+      s.net()->CreateTrafficRoute({alice_net}), cross_traffic_config);
 
   s.NetworkDelayedAction({alice_net, bob_net}, 100,
                          [&packet_received] { packet_received = true; });
@@ -62,9 +63,9 @@ void SetupVideoCall(Scenario& s, VideoQualityAnalyzer* analyzer) {
   CallClientConfig call_config;
   auto* alice = s.CreateClient("alice", call_config);
   auto* bob = s.CreateClient("bob", call_config);
-  NetworkNodeConfig network_config;
-  network_config.simulation.bandwidth = DataRate::kbps(1000);
-  network_config.simulation.delay = TimeDelta::ms(50);
+  NetworkSimulationConfig network_config;
+  network_config.bandwidth = DataRate::kbps(1000);
+  network_config.delay = TimeDelta::ms(50);
   auto alice_net = s.CreateSimulationNode(network_config);
   auto bob_net = s.CreateSimulationNode(network_config);
   auto route = s.CreateRoutes(alice, {alice_net}, bob, {bob_net});
@@ -101,8 +102,8 @@ TEST(ScenarioTest, MAYBE_SimTimeEncoding) {
     s.RunFor(TimeDelta::seconds(60));
   }
   // Regression tests based on previous runs.
-  EXPECT_NEAR(analyzer.stats().psnr.Mean(), 38, 2);
   EXPECT_EQ(analyzer.stats().lost_count, 0);
+  EXPECT_NEAR(analyzer.stats().psnr.Mean(), 38, 2);
 }
 
 // TODO(bugs.webrtc.org/10515): Remove this when performance has been improved.
@@ -121,8 +122,8 @@ TEST(ScenarioTest, MAYBE_RealTimeEncoding) {
     s.RunFor(TimeDelta::seconds(10));
   }
   // Regression tests based on previous runs.
-  EXPECT_NEAR(analyzer.stats().psnr.Mean(), 38, 10);
   EXPECT_LT(analyzer.stats().lost_count, 2);
+  EXPECT_NEAR(analyzer.stats().psnr.Mean(), 38, 10);
 }
 
 TEST(ScenarioTest, SimTimeFakeing) {
