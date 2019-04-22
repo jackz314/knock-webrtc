@@ -239,7 +239,7 @@ DefaultTemporalLayers::DefaultTemporalLayers(int number_of_temporal_layers)
   }
 
   kf_buffers_ = {kAllBuffers.begin(), kAllBuffers.end()};
-  for (DependencyInfo info : temporal_pattern_) {
+  for (const DependencyInfo& info : temporal_pattern_) {
     uint8_t updated_buffers = GetUpdatedBuffers(info.frame_config);
 
     for (Vp8BufferReference buffer : kAllBuffers) {
@@ -330,8 +330,8 @@ bool DefaultTemporalLayers::IsSyncFrame(const Vp8FrameConfig& config) const {
   return true;
 }
 
-Vp8FrameConfig DefaultTemporalLayers::UpdateLayerConfig(size_t stream_index,
-                                                        uint32_t timestamp) {
+Vp8FrameConfig DefaultTemporalLayers::NextFrameConfig(size_t stream_index,
+                                                      uint32_t timestamp) {
   RTC_DCHECK_LT(stream_index, StreamCount());
   RTC_DCHECK_GT(num_layers_, 0);
   RTC_DCHECK_GT(temporal_pattern_.size(), 0);
@@ -552,7 +552,7 @@ void DefaultTemporalLayers::OnPacketLossRateUpdate(float packet_loss_rate) {}
 void DefaultTemporalLayers::OnRttUpdate(int64_t rtt_ms) {}
 
 void DefaultTemporalLayers::OnLossNotification(
-    const VideoEncoder::LossNotification loss_notification) {}
+    const VideoEncoder::LossNotification& loss_notification) {}
 
 TemplateStructure DefaultTemporalLayers::GetTemplateStructure(
     int num_layers) const {

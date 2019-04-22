@@ -42,8 +42,8 @@ class ScreenshareLayers final : public Vp8FrameBufferController {
 
   // Returns the recommended VP8 encode flags needed. May refresh the decoder
   // and/or update the reference buffers.
-  Vp8FrameConfig UpdateLayerConfig(size_t stream_index,
-                                   uint32_t rtp_timestamp) override;
+  Vp8FrameConfig NextFrameConfig(size_t stream_index,
+                                 uint32_t rtp_timestamp) override;
 
   // New target bitrate, per temporal layer.
   void OnRatesUpdated(size_t stream_index,
@@ -68,7 +68,7 @@ class ScreenshareLayers final : public Vp8FrameBufferController {
   void OnRttUpdate(int64_t rtt_ms) override;
 
   void OnLossNotification(
-      const VideoEncoder::LossNotification loss_notification) override;
+      const VideoEncoder::LossNotification& loss_notification) override;
 
  private:
   enum class TemporalLayerState : int { kDrop, kTl0, kTl1, kTl1Sync };

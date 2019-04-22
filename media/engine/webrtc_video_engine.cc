@@ -464,12 +464,9 @@ void DefaultUnsignalledSsrcHandler::SetDefaultSink(
 
 WebRtcVideoEngine::WebRtcVideoEngine(
     std::unique_ptr<webrtc::VideoEncoderFactory> video_encoder_factory,
-    std::unique_ptr<webrtc::VideoDecoderFactory> video_decoder_factory,
-    std::unique_ptr<webrtc::VideoBitrateAllocatorFactory>
-        video_bitrate_allocator_factory)
+    std::unique_ptr<webrtc::VideoDecoderFactory> video_decoder_factory)
     : decoder_factory_(std::move(video_decoder_factory)),
-      encoder_factory_(std::move(video_encoder_factory)),
-      bitrate_allocator_factory_(std::move(video_bitrate_allocator_factory)) {
+      encoder_factory_(std::move(video_encoder_factory)) {
   RTC_LOG(LS_INFO) << "WebRtcVideoEngine::WebRtcVideoEngine()";
 }
 
@@ -481,11 +478,12 @@ VideoMediaChannel* WebRtcVideoEngine::CreateMediaChannel(
     webrtc::Call* call,
     const MediaConfig& config,
     const VideoOptions& options,
-    const webrtc::CryptoOptions& crypto_options) {
+    const webrtc::CryptoOptions& crypto_options,
+    webrtc::VideoBitrateAllocatorFactory* video_bitrate_allocator_factory) {
   RTC_LOG(LS_INFO) << "CreateMediaChannel. Options: " << options.ToString();
   return new WebRtcVideoChannel(call, config, options, crypto_options,
                                 encoder_factory_.get(), decoder_factory_.get(),
-                                bitrate_allocator_factory_.get());
+                                video_bitrate_allocator_factory);
 }
 std::vector<VideoCodec> WebRtcVideoEngine::codecs() const {
   return AssignPayloadTypesAndDefaultCodecs(encoder_factory_.get());
@@ -2269,10 +2267,20 @@ VideoSenderInfo WebRtcVideoChannel::WebRtcVideoSendStream::GetVideoSenderInfo(
        it != stats.substreams.end(); ++it) {
     // TODO(pbos): Wire up additional stats, such as padding bytes.
     webrtc::VideoSendStream::StreamStats stream_stats = it->second;
+    // TODO(http://crbug.com/webrtc/10525): Bytes sent should only include
+    // payload bytes, not header and padding bytes.
     info.bytes_sent += stream_stats.rtp_stats.transmitted.payload_bytes +
                        stream_stats.rtp_stats.transmitted.header_bytes +
                        stream_stats.rtp_stats.transmitted.padding_bytes;
     info.packets_sent += stream_stats.rtp_stats.transmitted.packets;
+    // TODO(https://crbug.com/webrtc/10555): RTX retransmissions should show up
+    // in separate outbound-rtp stream objects.
+    if (!stream_stats.is_rtx && !stream_stats.is_flexfec) {
+      info.retransmitted_bytes_sent +=
+          stream_stats.rtp_stats.retransmitted.payload_bytes;
+      info.retransmitted_packets_sent +=
+          stream_stats.rtp_stats.retransmitted.packets;
+    }
     info.packets_lost += stream_stats.rtcp_stats.packets_lost;
     if (stream_stats.width > info.send_frame_width)
       info.send_frame_width = stream_stats.width;

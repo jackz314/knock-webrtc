@@ -1086,6 +1086,9 @@ class PeerConnection : public PeerConnectionInternal,
     return media_transport;
   }
 
+  void UpdateNegotiationNeeded();
+  bool CheckIfNegotiationIsNeeded();
+
   sigslot::signal1<DataChannel*> SignalDataChannelCreated_
       RTC_GUARDED_BY(signaling_thread());
 
@@ -1329,6 +1332,16 @@ class PeerConnection : public PeerConnectionInternal,
   // channel manager and the session description factory.
   rtc::UniqueRandomIdGenerator ssrc_generator_
       RTC_GUARDED_BY(signaling_thread());
+
+  // A video bitrate allocator factory.
+  // This can injected using the PeerConnectionDependencies,
+  // or else the CreateBuiltinVideoBitrateAllocatorFactory() will be called.
+  // Note that one can still choose to override this in a MediaEngine
+  // if one wants too.
+  std::unique_ptr<webrtc::VideoBitrateAllocatorFactory>
+      video_bitrate_allocator_factory_;
+
+  bool is_negotiation_needed_ RTC_GUARDED_BY(signaling_thread()) = false;
 };
 
 }  // namespace webrtc
