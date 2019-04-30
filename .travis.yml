@@ -6,6 +6,7 @@ env:
 cache:
   directories:
   # gclient sync cache
+  - tools
   - third_party
 install:
   true
