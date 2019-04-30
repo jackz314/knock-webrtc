@@ -17,6 +17,7 @@
 #include "api/media_stream_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
+#include "api/task_queue/default_task_queue_factory.h"
 #include "api/test/video_quality_analyzer_interface.h"
 #include "api/units/time_delta.h"
 #include "logging/rtc_event_log/output/rtc_event_log_output_file.h"
@@ -102,6 +103,7 @@ PeerConnectionE2EQualityTest::PeerConnectionE2EQualityTest(
     std::unique_ptr<AudioQualityAnalyzerInterface> audio_quality_analyzer,
     std::unique_ptr<VideoQualityAnalyzerInterface> video_quality_analyzer)
     : clock_(Clock::GetRealTimeClock()),
+      task_queue_factory_(CreateDefaultTaskQueueFactory()),
       test_case_name_(std::move(test_case_name)) {
   // Create default video quality analyzer. We will always create an analyzer,
   // even if there are no video streams, because it will be installed into video
@@ -193,6 +195,11 @@ void PeerConnectionE2EQualityTest::PostTask(ScheduledActivity activity) {
   task_queue_->PostDelayedTask(
       [activity, start_time, this]() { activity.func(Now() - start_time); },
       remaining_delay.ms());
+}
+
+void PeerConnectionE2EQualityTest::AddQualityMetricsReporter(
+    std::unique_ptr<QualityMetricsReporter> quality_metrics_reporter) {
+  quality_metrics_reporters_.push_back(std::move(quality_metrics_reporter));
 }
 
 void PeerConnectionE2EQualityTest::AddPeer(
@@ -290,6 +297,9 @@ void PeerConnectionE2EQualityTest::Run(
   video_quality_analyzer_injection_helper_->Start(test_case_name_,
                                                   video_analyzer_threads);
   audio_quality_analyzer_->Start(test_case_name_, &analyzer_helper_);
+  for (auto& reporter : quality_metrics_reporters_) {
+    reporter->Start(test_case_name_);
+  }
 
   // Start RTCEventLog recording if requested.
   if (alice_->params()->rtc_event_log_path) {
@@ -362,6 +372,9 @@ void PeerConnectionE2EQualityTest::Run(
 
   audio_quality_analyzer_->Stop();
   video_quality_analyzer_injection_helper_->Stop();
+  for (auto& reporter : quality_metrics_reporters_) {
+    reporter->StopAndReportResults();
+  }
 
   // Ensuring that TestPeers have been destroyed in order to correctly close
   // Audio dumps.
@@ -549,12 +562,13 @@ PeerConnectionE2EQualityTest::MaybeAddVideo(TestPeer* peer) {
             writer);
 
     // Setup FrameGenerator into peer connection.
-    std::unique_ptr<test::FrameGeneratorCapturer> capturer =
-        absl::WrapUnique(test::FrameGeneratorCapturer::Create(
-            std::move(frame_generator), video_config.fps, clock_));
+    auto capturer = absl::make_unique<test::FrameGeneratorCapturer>(
+        clock_, std::move(frame_generator), video_config.fps,
+        *task_queue_factory_);
+    capturer->Init();
     rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource> source =
         new rtc::RefCountedObject<FrameGeneratorCapturerVideoTrackSource>(
-            move(capturer));
+            std::move(capturer));
     out.push_back(source);
     RTC_LOG(INFO) << "Adding video with video_config.stream_label="
                   << video_config.stream_label.value();

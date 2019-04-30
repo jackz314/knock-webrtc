@@ -274,6 +274,10 @@ struct PacketFeedback {
   uint16_t remote_net_id;
   // Pacing information about this packet.
   PacedPacketInfo pacing_info;
+
+  // The SSRC and RTP sequence number of the packet this feedback refers to.
+  uint32_t ssrc;
+  uint16_t rtp_sequence_number;
 };
 
 class PacketFeedbackComparator {
@@ -287,17 +291,25 @@ class PacketFeedbackComparator {
   }
 };
 
+struct RtpPacketSendInfo {
+ public:
+  RtpPacketSendInfo() = default;
+
+  uint16_t transport_sequence_number = 0;
+  uint32_t ssrc = 0;
+  uint16_t rtp_sequence_number = 0;
+  // Get rid of this flag when all code paths populate |rtp_sequence_number|.
+  bool has_rtp_sequence_number = false;
+  size_t length = 0;
+  PacedPacketInfo pacing_info;
+};
+
 class TransportFeedbackObserver {
  public:
   TransportFeedbackObserver() {}
   virtual ~TransportFeedbackObserver() {}
 
-  // Note: Transport-wide sequence number as sequence number.
-  virtual void AddPacket(uint32_t ssrc,
-                         uint16_t sequence_number,
-                         size_t length,
-                         const PacedPacketInfo& pacing_info) = 0;
-
+  virtual void OnAddPacket(const RtpPacketSendInfo& packet_info) = 0;
   virtual void OnTransportFeedback(const rtcp::TransportFeedback& feedback) = 0;
 };
 

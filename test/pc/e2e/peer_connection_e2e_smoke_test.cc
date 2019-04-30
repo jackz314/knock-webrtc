@@ -20,12 +20,19 @@
 #include "test/gtest.h"
 #include "test/pc/e2e/analyzer/audio/default_audio_quality_analyzer.h"
 #include "test/pc/e2e/analyzer/video/default_video_quality_analyzer.h"
+#include "test/pc/e2e/network_quality_metrics_reporter.h"
 #include "test/testsupport/file_utils.h"
 
 namespace webrtc {
 namespace webrtc_pc_e2e {
 
-TEST(PeerConnectionE2EQualityTestSmokeTest, RunWithEmulatedNetwork) {
+// IOS debug builds can be quite slow, disabling to avoid issues with timeouts.
+#if defined(WEBRTC_IOS) && defined(WEBRTC_ARCH_ARM64) && !defined(NDEBUG)
+#define MAYBE_RunWithEmulatedNetwork DISABLED_RunWithEmulatedNetwork
+#else
+#define MAYBE_RunWithEmulatedNetwork RunWithEmulatedNetwork
+#endif
+TEST(PeerConnectionE2EQualityTestSmokeTest, MAYBE_RunWithEmulatedNetwork) {
   using PeerConfigurer = PeerConnectionE2EQualityTestFixture::PeerConfigurer;
   using RunParams = PeerConnectionE2EQualityTestFixture::RunParams;
   using VideoConfig = PeerConnectionE2EQualityTestFixture::VideoConfig;
@@ -106,6 +113,10 @@ TEST(PeerConnectionE2EQualityTestSmokeTest, RunWithEmulatedNetwork) {
                          "pc_quality_smoke_test_bob_source", "wav");
                      bob->SetAudioConfig(std::move(audio_config));
                    });
+
+  fixture->AddQualityMetricsReporter(
+      absl::make_unique<NetworkQualityMetricsReporter>(alice_network,
+                                                       bob_network));
 
   RunParams run_params(TimeDelta::seconds(7));
   run_params.video_encoder_bitrate_multiplier = 1.1;

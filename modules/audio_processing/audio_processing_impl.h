@@ -246,7 +246,8 @@ class AudioProcessingImpl : public AudioProcessing {
   void InitializeResidualEchoDetector()
       RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_render_, crit_capture_);
   void InitializeLowCutFilter() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_capture_);
-  void InitializeEchoController() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_capture_);
+  void InitializeEchoController()
+      RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_render_, crit_capture_);
   void InitializeGainController2() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_capture_);
   void InitializePreAmplifier() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_capture_);
   void InitializePostProcessor() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_capture_);
@@ -417,6 +418,9 @@ class AudioProcessingImpl : public AudioProcessing {
     int split_rate;
     int stream_delay_ms;
     bool echo_controller_enabled = false;
+    bool use_aec2_extended_filter = false;
+    bool use_aec2_delay_agnostic = false;
+    bool use_aec2_refined_adaptive_filter = false;
   } capture_nonlocked_;
 
   struct ApmRenderState {
@@ -426,13 +430,9 @@ class AudioProcessingImpl : public AudioProcessing {
     std::unique_ptr<AudioBuffer> render_audio;
   } render_ RTC_GUARDED_BY(crit_render_);
 
-  size_t aec_render_queue_element_max_size_ RTC_GUARDED_BY(crit_render_)
-      RTC_GUARDED_BY(crit_capture_) = 0;
   std::vector<float> aec_render_queue_buffer_ RTC_GUARDED_BY(crit_render_);
   std::vector<float> aec_capture_queue_buffer_ RTC_GUARDED_BY(crit_capture_);
 
-  size_t aecm_render_queue_element_max_size_ RTC_GUARDED_BY(crit_render_)
-      RTC_GUARDED_BY(crit_capture_) = 0;
   std::vector<int16_t> aecm_render_queue_buffer_ RTC_GUARDED_BY(crit_render_);
   std::vector<int16_t> aecm_capture_queue_buffer_ RTC_GUARDED_BY(crit_capture_);
 

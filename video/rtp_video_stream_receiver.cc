@@ -231,16 +231,16 @@ int32_t RtpVideoStreamReceiver::OnReceivedPayloadData(
     size_t payload_size,
     const RTPHeader& rtp_header,
     const RTPVideoHeader& video_header,
-    VideoFrameType frame_type,
     const absl::optional<RtpGenericFrameDescriptor>& generic_descriptor,
     bool is_recovered) {
   VCMPacket packet(payload_data, payload_size, rtp_header, video_header,
-                   frame_type, ntp_estimator_.Estimate(rtp_header.timestamp));
+                   ntp_estimator_.Estimate(rtp_header.timestamp));
   packet.generic_descriptor = generic_descriptor;
 
   if (nack_module_) {
-    const bool is_keyframe = video_header.is_first_packet_in_frame &&
-                             frame_type == VideoFrameType::kVideoFrameKey;
+    const bool is_keyframe =
+        video_header.is_first_packet_in_frame &&
+        video_header.frame_type == VideoFrameType::kVideoFrameKey;
 
     packet.timesNacked = nack_module_->OnReceivedPacket(
         rtp_header.sequenceNumber, is_keyframe, is_recovered);
@@ -550,15 +550,20 @@ void RtpVideoStreamReceiver::ReceivePacket(const RtpPacketReceived& packet) {
   packet.GetExtension<PlayoutDelayLimits>(&video_header.playout_delay);
   packet.GetExtension<FrameMarkingExtension>(&video_header.frame_marking);
 
-  video_header.color_space = packet.GetExtension<ColorSpaceExtension>();
-  if (video_header.color_space ||
-      parsed_payload.frame_type == VideoFrameType::kVideoFrameKey) {
-    // Store color space since it's only transmitted when changed or for key
-    // frames. Color space will be cleared if a key frame is transmitted without
-    // color space information.
-    last_color_space_ = video_header.color_space;
-  } else if (last_color_space_) {
-    video_header.color_space = last_color_space_;
+  // Color space should only be transmitted in the last packet of a frame,
+  // therefore, neglect it otherwise so that last_color_space_ is not reset by
+  // mistake.
+  if (video_header.is_last_packet_in_frame) {
+    video_header.color_space = packet.GetExtension<ColorSpaceExtension>();
+    if (video_header.color_space ||
+        video_header.frame_type == VideoFrameType::kVideoFrameKey) {
+      // Store color space since it's only transmitted when changed or for key
+      // frames. Color space will be cleared if a key frame is transmitted
+      // without color space information.
+      last_color_space_ = video_header.color_space;
+    } else if (last_color_space_) {
+      video_header.color_space = last_color_space_;
+    }
   }
 
   absl::optional<RtpGenericFrameDescriptor> generic_descriptor_wire;
@@ -589,7 +594,7 @@ void RtpVideoStreamReceiver::ReceivePacket(const RtpPacketReceived& packet) {
         rtp_header.markerBit || generic_descriptor_wire->LastPacketInSubFrame();
 
     if (generic_descriptor_wire->FirstPacketInSubFrame()) {
-      parsed_payload.frame_type =
+      video_header.frame_type =
           generic_descriptor_wire->FrameDependenciesDiffs().empty()
               ? VideoFrameType::kVideoFrameKey
               : VideoFrameType::kVideoFrameDelta;
@@ -602,8 +607,8 @@ void RtpVideoStreamReceiver::ReceivePacket(const RtpPacketReceived& packet) {
   }
 
   OnReceivedPayloadData(parsed_payload.payload, parsed_payload.payload_length,
-                        rtp_header, video_header, parsed_payload.frame_type,
-                        generic_descriptor_wire, packet.recovered());
+                        rtp_header, video_header, generic_descriptor_wire,
+                        packet.recovered());
 }
 
 void RtpVideoStreamReceiver::ParseAndHandleEncapsulatingHeader(

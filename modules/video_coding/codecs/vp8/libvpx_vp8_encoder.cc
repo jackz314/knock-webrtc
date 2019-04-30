@@ -183,6 +183,9 @@ static void FillInEncoderConfig(vpx_codec_enc_cfg* vpx_config,
   vpx_config->rc_target_bitrate = config.rc_target_bitrate;
   vpx_config->rc_min_quantizer = config.rc_min_quantizer;
   vpx_config->rc_max_quantizer = config.rc_max_quantizer;
+  if (config.error_resilient.has_value()) {
+    vpx_config->g_error_resilient = config.error_resilient.value();
+  }
 }
 
 bool UpdateVpxConfiguration(size_t stream_index,
@@ -271,6 +274,8 @@ LibvpxVp8Encoder::LibvpxVp8Encoder(
           "WebRTC-VP8VariableFramerateScreenshare")),
       framerate_controller_(variable_framerate_experiment_.framerate_limit),
       num_steady_state_frames_(0) {
+  // TODO(eladalon/ilnik): These reservations might be wasting memory.
+  // InitEncode() is resizing to the actual size, which might be smaller.
   raw_images_.reserve(kMaxSimulcastStreams);
   encoded_images_.reserve(kMaxSimulcastStreams);
   send_stream_.reserve(kMaxSimulcastStreams);
@@ -289,22 +294,24 @@ int LibvpxVp8Encoder::Release() {
 
   encoded_images_.clear();
 
-  while (!encoders_.empty()) {
-    vpx_codec_ctx_t& encoder = encoders_.back();
-    if (inited_) {
-      if (libvpx_->codec_destroy(&encoder)) {
+  if (inited_) {
+    for (auto it = encoders_.rbegin(); it != encoders_.rend(); ++it) {
+      if (libvpx_->codec_destroy(&*it)) {
         ret_val = WEBRTC_VIDEO_CODEC_MEMORY;
       }
     }
-    encoders_.pop_back();
   }
+  encoders_.clear();
+
   configurations_.clear();
   send_stream_.clear();
   cpu_speed_.clear();
-  while (!raw_images_.empty()) {
-    libvpx_->img_free(&raw_images_.back());
-    raw_images_.pop_back();
+
+  for (auto it = raw_images_.rbegin(); it != raw_images_.rend(); ++it) {
+    libvpx_->img_free(&*it);
   }
+  raw_images_.clear();
+
   frame_buffer_controller_.reset();
   inited_ = false;
   return ret_val;
@@ -855,32 +862,51 @@ int LibvpxVp8Encoder::Encode(const VideoFrame& frame,
   if (encoded_complete_callback_ == NULL)
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
 
-  bool send_key_frame = false;
+  bool key_frame_requested = false;
   for (size_t i = 0; i < key_frame_request_.size() && i < send_stream_.size();
        ++i) {
     if (key_frame_request_[i] && send_stream_[i]) {
-      send_key_frame = true;
+      key_frame_requested = true;
       break;
     }
   }
-  if (!send_key_frame && frame_types) {
+  if (!key_frame_requested && frame_types) {
     for (size_t i = 0; i < frame_types->size() && i < send_stream_.size();
          ++i) {
       if ((*frame_types)[i] == VideoFrameType::kVideoFrameKey &&
           send_stream_[i]) {
-        send_key_frame = true;
+        key_frame_requested = true;
         break;
       }
     }
   }
 
   if (frame.update_rect().IsEmpty() && num_steady_state_frames_ >= 3 &&
-      !send_key_frame) {
+      !key_frame_requested) {
     if (variable_framerate_experiment_.enabled &&
         framerate_controller_.DropFrame(frame.timestamp() / kRtpTicksPerMs)) {
       return WEBRTC_VIDEO_CODEC_OK;
     }
     framerate_controller_.AddFrame(frame.timestamp() / kRtpTicksPerMs);
+  }
+
+  bool send_key_frame = key_frame_requested;
+  bool drop_frame = false;
+  Vp8FrameConfig tl_configs[kMaxSimulcastStreams];
+  for (size_t i = 0; i < encoders_.size(); ++i) {
+    tl_configs[i] =
+        frame_buffer_controller_->NextFrameConfig(i, frame.timestamp());
+    send_key_frame |= tl_configs[i].IntraFrame();
+    drop_frame |= tl_configs[i].drop_frame;
+  }
+
+  if (drop_frame && !send_key_frame) {
+    return WEBRTC_VIDEO_CODEC_OK;
+  }
+
+  vpx_enc_frame_flags_t flags[kMaxSimulcastStreams];
+  for (size_t i = 0; i < encoders_.size(); ++i) {
+    flags[i] = send_key_frame ? VPX_EFLAG_FORCE_KF : EncodeFlags(tl_configs[i]);
   }
 
   rtc::scoped_refptr<I420BufferInterface> input_image =
@@ -903,6 +929,16 @@ int LibvpxVp8Encoder::Encode(const VideoFrame& frame,
   raw_images_[0].stride[VPX_PLANE_U] = input_image->StrideU();
   raw_images_[0].stride[VPX_PLANE_V] = input_image->StrideV();
 
+  struct CleanUpOnExit {
+    explicit CleanUpOnExit(vpx_image_t& raw_image) : raw_image_(raw_image) {}
+    ~CleanUpOnExit() {
+      raw_image_.planes[VPX_PLANE_Y] = nullptr;
+      raw_image_.planes[VPX_PLANE_U] = nullptr;
+      raw_image_.planes[VPX_PLANE_V] = nullptr;
+    }
+    vpx_image_t& raw_image_;
+  } clean_up_on_exit(raw_images_[0]);
+
   for (size_t i = 1; i < encoders_.size(); ++i) {
     // Scale the image down a number of times by downsampling factor
     libyuv::I420Scale(
@@ -919,20 +955,6 @@ int LibvpxVp8Encoder::Encode(const VideoFrame& frame,
         raw_images_[i].d_h, libyuv::kFilterBilinear);
   }
 
-  vpx_enc_frame_flags_t flags[kMaxSimulcastStreams];
-  Vp8FrameConfig tl_configs[kMaxSimulcastStreams];
-  for (size_t i = 0; i < encoders_.size(); ++i) {
-    tl_configs[i] =
-        frame_buffer_controller_->NextFrameConfig(i, frame.timestamp());
-    if (tl_configs[i].drop_frame) {
-      if (send_key_frame) {
-        continue;
-      }
-      // Drop this frame.
-      return WEBRTC_VIDEO_CODEC_OK;
-    }
-    flags[i] = EncodeFlags(tl_configs[i]);
-  }
   if (send_key_frame) {
     // Adapt the size of the key frame when in screenshare with 1 temporal
     // layer.
@@ -943,11 +965,7 @@ int LibvpxVp8Encoder::Encode(const VideoFrame& frame,
       libvpx_->codec_control(&(encoders_[0]), VP8E_SET_MAX_INTRA_BITRATE_PCT,
                              forceKeyFrameIntraTh);
     }
-    // Key frame request from caller.
-    // Will update both golden and alt-ref.
-    for (size_t i = 0; i < encoders_.size(); ++i) {
-      flags[i] = VPX_EFLAG_FORCE_KF;
-    }
+
     std::fill(key_frame_request_.begin(), key_frame_request_.end(), false);
   }
 

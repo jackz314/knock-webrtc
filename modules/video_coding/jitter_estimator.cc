@@ -112,10 +112,6 @@ void VCMJitterEstimator::Reset() {
   fps_counter_.Reset();
 }
 
-void VCMJitterEstimator::ResetNackCount() {
-  _nackCount = 0;
-}
-
 // Updates the estimates with the new measurements.
 void VCMJitterEstimator::UpdateEstimate(int64_t frameDelayMS,
                                         uint32_t frameSizeBytes,
@@ -376,15 +372,10 @@ void VCMJitterEstimator::UpdateRtt(int64_t rttMs) {
   _rttFilter.Update(rttMs);
 }
 
-void VCMJitterEstimator::UpdateMaxFrameSize(uint32_t frameSizeBytes) {
-  if (_maxFrameSize < frameSizeBytes) {
-    _maxFrameSize = frameSizeBytes;
-  }
-}
-
 // Returns the current filtered estimate if available,
 // otherwise tries to calculate an estimate.
-int VCMJitterEstimator::GetJitterEstimate(double rttMultiplier) {
+int VCMJitterEstimator::GetJitterEstimate(double rttMultiplier,
+                                          double jitterEstCapMs) {
   double jitterMS = CalculateEstimate() + OPERATING_SYSTEM_JITTER;
   uint64_t now = clock_->TimeInMicroseconds();
 
@@ -393,8 +384,10 @@ int VCMJitterEstimator::GetJitterEstimate(double rttMultiplier) {
 
   if (_filterJitterEstimate > jitterMS)
     jitterMS = _filterJitterEstimate;
-  if (_nackCount >= _nackLimit)
+  if (_nackCount >= _nackLimit) {
     jitterMS += _rttFilter.RttMs() * rttMultiplier;
+    jitterMS = std::min(jitterMS, jitterEstCapMs);
+  }
 
   static const double kJitterScaleLowThreshold = 5.0;
   static const double kJitterScaleHighThreshold = 10.0;

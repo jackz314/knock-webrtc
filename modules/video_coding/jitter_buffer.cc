@@ -413,7 +413,7 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
 
   // Empty packets may bias the jitter estimate (lacking size component),
   // therefore don't let empty packet trigger the following updates:
-  if (packet.frameType != VideoFrameType::kEmptyFrame) {
+  if (packet.video_header.frame_type != VideoFrameType::kEmptyFrame) {
     if (waiting_for_completion_.timestamp == packet.timestamp) {
       // This can get bad if we have a lot of duplicate packets,
       // we will then count some packet multiple times.
@@ -446,7 +446,7 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
         frame->IncrementNackCount();
       }
       if (!UpdateNackList(packet.seqNum) &&
-          packet.frameType != VideoFrameType::kVideoFrameKey) {
+          packet.video_header.frame_type != VideoFrameType::kVideoFrameKey) {
         buffer_state = kFlushIndicator;
       }
 
@@ -582,7 +582,8 @@ void VCMJitterBuffer::FindAndInsertContinuousFramesWithState(
 uint32_t VCMJitterBuffer::EstimatedJitterMs() {
   rtc::CritScope cs(&crit_sect_);
   const double rtt_mult = 1.0f;
-  return jitter_estimate_.GetJitterEstimate(rtt_mult);
+  const double jitter_est_cap_ms = 300.0f;
+  return jitter_estimate_.GetJitterEstimate(rtt_mult, jitter_est_cap_ms);
 }
 
 void VCMJitterBuffer::SetNackSettings(size_t max_nack_list_size,

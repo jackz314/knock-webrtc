@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "absl/memory/memory.h"
+#include "api/task_queue/task_queue_factory.h"
 #include "api/test/audio_quality_analyzer_interface.h"
 #include "api/test/peerconnection_quality_test_fixture.h"
 #include "api/units/time_delta.h"
@@ -154,6 +155,8 @@ class PeerConnectionE2EQualityTest
   using RunParams = PeerConnectionE2EQualityTestFixture::RunParams;
   using VideoConfig = PeerConnectionE2EQualityTestFixture::VideoConfig;
   using PeerConfigurer = PeerConnectionE2EQualityTestFixture::PeerConfigurer;
+  using QualityMetricsReporter =
+      PeerConnectionE2EQualityTestFixture::QualityMetricsReporter;
 
   PeerConnectionE2EQualityTest(
       std::string test_case_name,
@@ -167,6 +170,9 @@ class PeerConnectionE2EQualityTest
   void ExecuteEvery(TimeDelta initial_delay_since_start,
                     TimeDelta interval,
                     std::function<void(TimeDelta)> func) override;
+
+  void AddQualityMetricsReporter(std::unique_ptr<QualityMetricsReporter>
+                                     quality_metrics_reporter) override;
 
   void AddPeer(rtc::Thread* network_thread,
                rtc::NetworkManager* network_manager,
@@ -219,6 +225,7 @@ class PeerConnectionE2EQualityTest
   Timestamp Now() const;
 
   Clock* const clock_;
+  const std::unique_ptr<TaskQueueFactory> task_queue_factory_;
   std::string test_case_name_;
   std::unique_ptr<VideoQualityAnalyzerInjectionHelper>
       video_quality_analyzer_injection_helper_;
@@ -230,6 +237,8 @@ class PeerConnectionE2EQualityTest
 
   std::unique_ptr<TestPeer> alice_;
   std::unique_ptr<TestPeer> bob_;
+  std::vector<std::unique_ptr<QualityMetricsReporter>>
+      quality_metrics_reporters_;
 
   std::vector<rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>
       alice_video_sources_;
