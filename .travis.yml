@@ -3,6 +3,10 @@ language: generic
 env:
   global:
     - secure: "jAuN252Zy/dPhaiswx6GIDpWzKl72jRnLk7tH8qYsxXVx64rZrkHdFMZ606QDyEhWTmO1MMAXg62draFSN4kkg5oSOV6tkt4/11hm7loS6HfchMItdLpVdrX3nq21thgo1TdkRt7MI5Ke0i+xr/8M3+FVaJKp6u9OK07vVavRBcHH8q3dn1CscgRtTc2EuKWHEgwez9mGoFwF2ppjAWfVH3E/1Vev7I4Kn0oGVxRQ86GnTTJp3R9h8n/O2S/j63P6sCD+DqICquPe5JQBe9O9AOu660sJmnmv5YT/yoChJ/0/lOGm9nehK5h+jQxQiTx7a9N4KYJEHEPf7dVI4Lvut/pbYjaxoM6hYpJl5GWRZf9RSg0XLzkjKWA0se44EW1x0hlLXmYBqFIaufTHb1SXW+eTs4H1gZvmGKL6nausi+cJEn3G9iSpmF0A6nv6zzUK2pgDPd1CcKaVSvqN8kZmzM5/GQKztIOSBYZ0Vc8G0RzDsFcrorPu3+CB+IiWdFlHalnUHjXTP++DMIMMzun8jKfTqUnn2I1I3xqGRBt5O9LCG9/CVg2VEMKPGigXGPFtpMIT7NsQvc6Yv0TthRVmrId92b21EZ4UhHyk5/J4bg1jNO7XKmTdwvlCKaIJFJ6zGfY/n1qdCM7YLyGFefCI+Fpc1aHoi/fuDUNH8oHw6Y=" #$GITHUB_TOKEN (travis)
+cache:
+  directories:
+  # gclient sync cache
+  - third_party
 install:
   true
 script:
