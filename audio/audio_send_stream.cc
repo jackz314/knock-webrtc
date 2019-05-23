@@ -21,6 +21,7 @@
 #include "api/call/transport.h"
 #include "api/crypto/frame_encryptor_interface.h"
 #include "api/function_view.h"
+#include "api/media_transport_config.h"
 #include "audio/audio_state.h"
 #include "audio/channel_send.h"
 #include "audio/conversion.h"
@@ -104,7 +105,7 @@ AudioSendStream::AudioSendStream(
                       voe::CreateChannelSend(clock,
                                              task_queue_factory,
                                              module_process_thread,
-                                             config.media_transport,
+                                             config.media_transport_config,
                                              /*overhead_observer=*/this,
                                              config.send_transport,
                                              rtcp_rtt_stats,
@@ -127,8 +128,7 @@ AudioSendStream::AudioSendStream(
     std::unique_ptr<voe::ChannelSendInterface> channel_send)
     : clock_(clock),
       worker_queue_(rtp_transport->GetWorkerQueue()),
-      config_(Config(/*send_transport=*/nullptr,
-                     /*media_transport=*/nullptr)),
+      config_(Config(/*send_transport=*/nullptr, MediaTransportConfig())),
       audio_state_(audio_state),
       channel_send_(std::move(channel_send)),
       event_log_(event_log),
@@ -151,15 +151,15 @@ AudioSendStream::AudioSendStream(
   // time being, we can have either. When media transport is injected, there
   // should be no rtp_transport, and below check should be strengthened to XOR
   // (either rtp_transport or media_transport but not both).
-  RTC_DCHECK(rtp_transport || config.media_transport);
-  if (config.media_transport) {
+  RTC_DCHECK(rtp_transport || config.media_transport_config.media_transport);
+  if (config.media_transport_config.media_transport) {
     // TODO(sukhanov): Currently media transport audio overhead is considered
     // constant, we will not get overhead_observer calls when using
     // media_transport. In the future when we introduce RTP media transport we
     // should make audio overhead interface consistent and work for both RTP and
     // non-RTP implementations.
     audio_overhead_per_packet_bytes_ =
-        config.media_transport->GetAudioPacketOverhead();
+        config.media_transport_config.media_transport->GetAudioPacketOverhead();
   }
   rtp_rtcp_module_ = channel_send_->GetRtpRtcp();
   RTC_DCHECK(rtp_rtcp_module_);
@@ -284,7 +284,11 @@ void AudioSendStream::ConfigureStream(
       // send side congestion control, wich depends on feedback packets which
       // requires transport sequence numbers to be enabled.
       if (stream->rtp_transport_) {
-        stream->rtp_transport_->EnablePeriodicAlrProbing(true);
+        // Optionally request ALR probing but do not override any existing
+        // request from other streams.
+        if (stream->allocation_settings_.RequestAlrProbing()) {
+          stream->rtp_transport_->EnablePeriodicAlrProbing(true);
+        }
         bandwidth_observer = stream->rtp_transport_->GetBandwidthObserver();
       }
     }
@@ -446,18 +450,11 @@ void AudioSendStream::DeliverRtcp(const uint8_t* packet, size_t length) {
 }
 
 uint32_t AudioSendStream::OnBitrateUpdated(BitrateAllocationUpdate update) {
-  // A send stream may be allocated a bitrate of zero if the allocator decides
-  // to disable it. For now we ignore this decision and keep sending on min
-  // bitrate.
-  if (update.target_bitrate.IsZero()) {
-    update.target_bitrate = DataRate::bps(config_.min_bitrate_bps);
-  }
-  RTC_DCHECK_GE(update.target_bitrate.bps<int>(), config_.min_bitrate_bps);
-  // The bitrate allocator might allocate an higher than max configured bitrate
-  // if there is room, to allow for, as example, extra FEC. Ignore that for now.
-  const DataRate max_bitrate = DataRate::bps(config_.max_bitrate_bps);
-  if (update.target_bitrate > max_bitrate)
-    update.target_bitrate = max_bitrate;
+  // Pick a target bitrate between the constraints. Overrules the allocator if
+  // it 1) allocated a bitrate of zero to disable the stream or 2) allocated a
+  // higher than max to allow for e.g. extra FEC.
+  auto constraints = GetMinMaxBitrateConstraints();
+  update.target_bitrate.Clamp(constraints.min, constraints.max);
 
   channel_send_->OnBitrateAllocation(update);
 
@@ -804,12 +801,16 @@ void AudioSendStream::ReconfigureBitrateObserver(
 void AudioSendStream::ConfigureBitrateObserver() {
   // This either updates the current observer or adds a new observer.
   // TODO(srte): Add overhead compensation here.
+  auto constraints = GetMinMaxBitrateConstraints();
+
   bitrate_allocator_->AddObserver(
-      this, MediaStreamAllocationConfig{
-                static_cast<uint32_t>(config_.min_bitrate_bps),
-                static_cast<uint32_t>(config_.max_bitrate_bps), 0,
-                allocation_settings_.DefaultPriorityBitrate().bps(), true,
-                config_.track_id, config_.bitrate_priority});
+      this,
+      MediaStreamAllocationConfig{
+          constraints.min.bps<uint32_t>(), constraints.max.bps<uint32_t>(), 0,
+          allocation_settings_.DefaultPriorityBitrate().bps(), true,
+          config_.track_id,
+          allocation_settings_.BitratePriority().value_or(
+              config_.bitrate_priority)});
 }
 
 void AudioSendStream::RemoveBitrateObserver() {
@@ -822,6 +823,36 @@ void AudioSendStream::RemoveBitrateObserver() {
     thread_sync_event.Set();
   });
   thread_sync_event.Wait(rtc::Event::kForever);
+}
+
+AudioSendStream::TargetAudioBitrateConstraints
+AudioSendStream::GetMinMaxBitrateConstraints() const {
+  TargetAudioBitrateConstraints constraints{
+      DataRate::bps(config_.min_bitrate_bps),
+      DataRate::bps(config_.max_bitrate_bps)};
+
+  // If bitrates were explicitly overriden via field trial, use those values.
+  if (allocation_settings_.MinBitrate())
+    constraints.min = *allocation_settings_.MinBitrate();
+  if (allocation_settings_.MaxBitrate())
+    constraints.max = *allocation_settings_.MaxBitrate();
+
+  RTC_DCHECK_GE(constraints.min.bps(), 0);
+  RTC_DCHECK_GE(constraints.max.bps(), 0);
+  RTC_DCHECK_GE(constraints.max.bps(), constraints.min.bps());
+
+  // TODO(srte,dklee): Replace these with proper overhead calculations.
+  if (allocation_settings_.IncludeOverheadInAudioAllocation()) {
+    // OverheadPerPacket = Ipv4(20B) + UDP(8B) + SRTP(10B) + RTP(12)
+    const DataSize kOverheadPerPacket = DataSize::bytes(20 + 8 + 10 + 12);
+    const TimeDelta kMaxFrameLength = TimeDelta::ms(60);  // Based on Opus spec
+    const DataRate kMinOverhead = kOverheadPerPacket / kMaxFrameLength;
+    constraints.min += kMinOverhead;
+    // TODO(dklee): This is obviously overly conservative to avoid exceeding max
+    // bitrate. Carefully reconsider the logic when addressing todo above.
+    constraints.max += kMinOverhead;
+  }
+  return constraints;
 }
 
 void AudioSendStream::RegisterCngPayloadType(int payload_type,

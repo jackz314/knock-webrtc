@@ -29,6 +29,7 @@
 #include "media/engine/webrtc_media_engine.h"
 #include "media/engine/webrtc_voice_engine.h"
 #include "rtc_base/copy_on_write_buffer.h"
+#include "rtc_base/experiments/field_trial_parser.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/strings/string_builder.h"
 #include "rtc_base/time_utils.h"
@@ -387,15 +388,18 @@ WebRtcVideoChannel::WebRtcVideoSendStream::ConfigureVideoEncoderSettings(
     // Ensure frame dropping is always enabled.
     RTC_DCHECK(vp9_settings.frameDroppingOn);
     if (!is_screencast) {
-      const std::string group =
-          webrtc::field_trial::FindFullName("WebRTC-Vp9InterLayerPred");
-      int mode;
-      if (!group.empty() && sscanf(group.c_str(), "%d", &mode) == 1 &&
-          (mode == static_cast<int>(webrtc::InterLayerPredMode::kOn) ||
-           mode == static_cast<int>(webrtc::InterLayerPredMode::kOnKeyPic) ||
-           mode == static_cast<int>(webrtc::InterLayerPredMode::kOff))) {
-        vp9_settings.interLayerPred =
-            static_cast<webrtc::InterLayerPredMode>(mode);
+      webrtc::FieldTrialFlag interlayer_pred_experiment_enabled =
+          webrtc::FieldTrialFlag("Enabled");
+      webrtc::FieldTrialEnum<webrtc::InterLayerPredMode> inter_layer_pred_mode(
+          "inter_layer_pred_mode", webrtc::InterLayerPredMode::kOnKeyPic,
+          {{"off", webrtc::InterLayerPredMode::kOff},
+           {"on", webrtc::InterLayerPredMode::kOn},
+           {"onkeypic", webrtc::InterLayerPredMode::kOnKeyPic}});
+      webrtc::ParseFieldTrial(
+          {&interlayer_pred_experiment_enabled, &inter_layer_pred_mode},
+          webrtc::field_trial::FindFullName("WebRTC-Vp9InterLayerPred"));
+      if (interlayer_pred_experiment_enabled) {
+        vp9_settings.interLayerPred = inter_layer_pred_mode;
       } else {
         // Limit inter-layer prediction to key pictures by default.
         vp9_settings.interLayerPred = webrtc::InterLayerPredMode::kOnKeyPic;
@@ -1205,7 +1209,7 @@ bool WebRtcVideoChannel::AddRecvStream(const StreamParams& sp,
   for (uint32_t used_ssrc : sp.ssrcs)
     receive_ssrcs_.insert(used_ssrc);
 
-  webrtc::VideoReceiveStream::Config config(this, media_transport());
+  webrtc::VideoReceiveStream::Config config(this, media_transport_config());
   webrtc::FlexfecReceiveStream::Config flexfec_config(this);
   ConfigureReceiverRtp(&config, &flexfec_config, sp);
 
@@ -1536,9 +1540,9 @@ void WebRtcVideoChannel::OnNetworkRouteChanged(
 
 void WebRtcVideoChannel::SetInterface(
     NetworkInterface* iface,
-    webrtc::MediaTransportInterface* media_transport) {
+    const webrtc::MediaTransportConfig& media_transport_config) {
   RTC_DCHECK_RUN_ON(&thread_checker_);
-  MediaChannel::SetInterface(iface, media_transport);
+  MediaChannel::SetInterface(iface, media_transport_config);
   // Set the RTP recv/send buffer to a bigger size.
 
   // The group should be a positive integer with an explicit size, in
@@ -1719,7 +1723,11 @@ WebRtcVideoChannel::WebRtcVideoSendStream::WebRtcVideoSendStream(
       parameters_(std::move(config), options, max_bitrate_bps, codec_settings),
       rtp_parameters_(CreateRtpParametersWithEncodings(sp)),
       sending_(false) {
-  parameters_.config.rtp.max_packet_size = kVideoMtu;
+  // Maximum packet size may come in RtpConfig from external transport, for
+  // example from QuicTransportInterface implementation, so do not exceed
+  // given max_packet_size.
+  parameters_.config.rtp.max_packet_size =
+      std::min<size_t>(parameters_.config.rtp.max_packet_size, kVideoMtu);
   parameters_.conference_mode = send_params.conference_mode;
 
   sp.GetPrimarySsrcs(&parameters_.config.rtp.ssrcs);
@@ -2253,6 +2261,7 @@ VideoSenderInfo WebRtcVideoChannel::WebRtcVideoSendStream::GetVideoSenderInfo(
   info.encode_usage_percent = stats.encode_usage_percent;
   info.frames_encoded = stats.frames_encoded;
   info.total_encode_time_ms = stats.total_encode_time_ms;
+  info.total_encoded_bytes_target = stats.total_encoded_bytes_target;
   info.qp_sum = stats.qp_sum;
 
   info.nominal_bitrate = stats.media_bitrate_bps;
@@ -2262,6 +2271,7 @@ VideoSenderInfo WebRtcVideoChannel::WebRtcVideoSendStream::GetVideoSenderInfo(
 
   info.send_frame_width = 0;
   info.send_frame_height = 0;
+  info.total_packet_send_delay_ms = 0;
   for (std::map<uint32_t, webrtc::VideoSendStream::StreamStats>::iterator it =
            stats.substreams.begin();
        it != stats.substreams.end(); ++it) {
@@ -2273,6 +2283,7 @@ VideoSenderInfo WebRtcVideoChannel::WebRtcVideoSendStream::GetVideoSenderInfo(
                        stream_stats.rtp_stats.transmitted.header_bytes +
                        stream_stats.rtp_stats.transmitted.padding_bytes;
     info.packets_sent += stream_stats.rtp_stats.transmitted.packets;
+    info.total_packet_send_delay_ms += stream_stats.total_packet_send_delay_ms;
     // TODO(https://crbug.com/webrtc/10555): RTX retransmissions should show up
     // in separate outbound-rtp stream objects.
     if (!stream_stats.is_rtx && !stream_stats.is_flexfec) {

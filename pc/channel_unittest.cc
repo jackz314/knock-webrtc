@@ -8,6 +8,8 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "pc/channel.h"
+
 #include <cstdint>
 #include <memory>
 #include <utility>
@@ -15,6 +17,7 @@
 #include "absl/memory/memory.h"
 #include "api/array_view.h"
 #include "api/audio_options.h"
+#include "api/media_transport_config.h"
 #include "api/rtp_parameters.h"
 #include "media/base/codec.h"
 #include "media/base/fake_media_engine.h"
@@ -25,7 +28,6 @@
 #include "p2p/base/fake_packet_transport.h"
 #include "p2p/base/ice_transport_internal.h"
 #include "p2p/base/p2p_constants.h"
-#include "pc/channel.h"
 #include "pc/dtls_srtp_transport.h"
 #include "pc/jsep_transport.h"
 #include "pc/rtp_transport.h"
@@ -94,8 +96,8 @@ class VideoTraits : public Traits<cricket::VideoChannel,
 
 class DataTraits : public Traits<cricket::RtpDataChannel,
                                  cricket::FakeDataMediaChannel,
-                                 cricket::DataContentDescription,
-                                 cricket::DataCodec,
+                                 cricket::RtpDataContentDescription,
+                                 cricket::RtpDataCodec,
                                  cricket::DataMediaInfo,
                                  cricket::DataOptions> {};
 
@@ -263,7 +265,7 @@ class ChannelTest : public ::testing::Test, public sigslot::has_slots<> {
         worker_thread, network_thread, signaling_thread, std::move(ch),
         cricket::CN_AUDIO, (flags & DTLS) != 0, webrtc::CryptoOptions(),
         &ssrc_generator_);
-    channel->Init_w(rtp_transport, /*media_transport=*/nullptr);
+    channel->Init_w(rtp_transport, webrtc::MediaTransportConfig());
     return channel;
   }
 
@@ -1626,7 +1628,7 @@ std::unique_ptr<cricket::VideoChannel> ChannelTest<VideoTraits>::CreateChannel(
       worker_thread, network_thread, signaling_thread, std::move(ch),
       cricket::CN_VIDEO, (flags & DTLS) != 0, webrtc::CryptoOptions(),
       &ssrc_generator_);
-  channel->Init_w(rtp_transport, /*media_transport=*/nullptr);
+  channel->Init_w(rtp_transport, webrtc::MediaTransportConfig());
   return channel;
 }
 
@@ -2299,7 +2301,7 @@ std::unique_ptr<cricket::RtpDataChannel> ChannelTest<DataTraits>::CreateChannel(
       worker_thread, network_thread, signaling_thread, std::move(ch),
       cricket::CN_DATA, (flags & DTLS) != 0, webrtc::CryptoOptions(),
       &ssrc_generator_);
-  channel->Init_w(rtp_transport);
+  channel->Init_w(rtp_transport, webrtc::MediaTransportConfig());
   return channel;
 }
 
@@ -2308,15 +2310,15 @@ void ChannelTest<DataTraits>::CreateContent(
     int flags,
     const cricket::AudioCodec& audio_codec,
     const cricket::VideoCodec& video_codec,
-    cricket::DataContentDescription* data) {
+    cricket::RtpDataContentDescription* data) {
   data->AddCodec(kGoogleDataCodec);
   data->set_rtcp_mux((flags & RTCP_MUX) != 0);
 }
 
 template <>
 void ChannelTest<DataTraits>::CopyContent(
-    const cricket::DataContentDescription& source,
-    cricket::DataContentDescription* data) {
+    const cricket::RtpDataContentDescription& source,
+    cricket::RtpDataContentDescription* data) {
   *data = source;
 }
 
@@ -2330,7 +2332,7 @@ template <>
 void ChannelTest<DataTraits>::AddLegacyStreamInContent(
     uint32_t ssrc,
     int flags,
-    cricket::DataContentDescription* data) {
+    cricket::RtpDataContentDescription* data) {
   data->AddLegacyStream(ssrc);
 }
 

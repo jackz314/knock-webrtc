@@ -25,6 +25,7 @@
 #include "pc/peer_connection_factory.h"
 #include "pc/peer_connection_internal.h"
 #include "pc/rtc_stats_collector.h"
+#include "pc/rtp_sender.h"
 #include "pc/rtp_transceiver.h"
 #include "pc/sctp_transport.h"
 #include "pc/stats_collector.h"
@@ -57,6 +58,7 @@ class PeerConnection : public PeerConnectionInternal,
                        public DataChannelProviderInterface,
                        public DataChannelSink,
                        public JsepTransportController::Observer,
+                       public RtpSenderBase::SetStreamsObserver,
                        public rtc::MessageHandler,
                        public sigslot::has_slots<> {
  public:
@@ -211,6 +213,7 @@ class PeerConnection : public PeerConnectionInternal,
                                        int64_t max_size_bytes) override;
   bool StartRtcEventLog(std::unique_ptr<RtcEventLogOutput> output,
                         int64_t output_period_ms) override;
+  bool StartRtcEventLog(std::unique_ptr<RtcEventLogOutput> output) override;
   void StopRtcEventLog() override;
 
   void Close() override;
@@ -876,9 +879,6 @@ class PeerConnection : public PeerConnectionInternal,
   // down to all of the channels.
   RTCError PushdownMediaDescription(SdpType type, cricket::ContentSource source)
       RTC_RUN_ON(signaling_thread());
-  bool PushdownSctpParameters_n(cricket::ContentSource source,
-                                int local_sctp_port,
-                                int remote_sctp_port);
 
   RTCError PushdownTransportDescription(cricket::ContentSource source,
                                         SdpType type);
@@ -911,6 +911,9 @@ class PeerConnection : public PeerConnectionInternal,
   // Uses |candidate| in this session.
   bool UseCandidate(const IceCandidateInterface* candidate)
       RTC_RUN_ON(signaling_thread());
+  RTCErrorOr<const cricket::ContentInfo*> FindContentInfo(
+      const SessionDescriptionInterface* description,
+      const IceCandidateInterface* candidate) RTC_RUN_ON(signaling_thread());
   // Deletes the corresponding channel of contents that don't exist in |desc|.
   // |desc| can be null. This means that all channels are deleted.
   void RemoveUnusedChannels(const cricket::SessionDescription* desc)
@@ -1056,6 +1059,9 @@ class PeerConnection : public PeerConnectionInternal,
                           RtpTransportInternal* rtp_transport,
                           rtc::scoped_refptr<DtlsTransport> dtls_transport,
                           MediaTransportInterface* media_transport) override;
+
+  // RtpSenderBase::SetStreamsObserver override.
+  void OnSetStreams() override;
 
   // Returns the observer. Will crash on CHECK if the observer is removed.
   PeerConnectionObserver* Observer() const RTC_RUN_ON(signaling_thread());

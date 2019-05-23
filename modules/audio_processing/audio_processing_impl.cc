@@ -853,6 +853,7 @@ void AudioProcessingImpl::SetRuntimeSetting(RuntimeSetting setting) {
     case RuntimeSetting::Type::kCapturePreGain:
     case RuntimeSetting::Type::kCaptureCompressionGain:
     case RuntimeSetting::Type::kCaptureFixedPostGain:
+    case RuntimeSetting::Type::kPlayoutVolumeChange:
       capture_runtime_settings_enqueuer_.Enqueue(setting);
       return;
   }
@@ -998,6 +999,12 @@ void AudioProcessingImpl::HandleCaptureRuntimeSettings() {
         }
         break;
       }
+      case RuntimeSetting::Type::kPlayoutVolumeChange: {
+        int value;
+        setting.GetInt(&value);
+        capture_.playout_volume = value;
+        break;
+      }
       case RuntimeSetting::Type::kCustomRenderProcessingRuntimeSetting:
         RTC_NOTREACHED();
         break;
@@ -1023,6 +1030,7 @@ void AudioProcessingImpl::HandleRenderRuntimeSettings() {
       case RuntimeSetting::Type::kCapturePreGain:          // fall-through
       case RuntimeSetting::Type::kCaptureCompressionGain:  // fall-through
       case RuntimeSetting::Type::kCaptureFixedPostGain:    // fall-through
+      case RuntimeSetting::Type::kPlayoutVolumeChange:     // fall-through
       case RuntimeSetting::Type::kNotSpecified:
         RTC_NOTREACHED();
         break;
@@ -1253,8 +1261,6 @@ int AudioProcessingImpl::ProcessCaptureStreamLocked() {
                     !!private_submodules_->echo_control_mobile,
                 1);
 
-  MaybeUpdateHistograms();
-
   AudioBuffer* capture_buffer = capture_.capture_audio.get();  // For brevity.
 
   if (private_submodules_->pre_amplifier) {
@@ -1293,6 +1299,14 @@ int AudioProcessingImpl::ProcessCaptureStreamLocked() {
            capture_.prev_pre_amp_gain >= 0.f);
       capture_.prev_pre_amp_gain = pre_amp_gain;
     }
+
+    // Detect volume change.
+    capture_.echo_path_gain_change =
+        capture_.echo_path_gain_change ||
+        (capture_.prev_playout_volume != capture_.playout_volume &&
+         capture_.prev_playout_volume >= 0);
+    capture_.prev_playout_volume = capture_.playout_volume;
+
     private_submodules_->echo_controller->AnalyzeCapture(capture_buffer);
   }
 
@@ -1767,10 +1781,8 @@ AudioProcessing::Config AudioProcessingImpl::GetConfig() const {
 bool AudioProcessingImpl::UpdateActiveSubmoduleStates() {
   return submodule_states_.Update(
       config_.high_pass_filter.enabled,
-      private_submodules_->echo_cancellation &&
-          private_submodules_->echo_cancellation->is_enabled(),
-      private_submodules_->echo_control_mobile &&
-          private_submodules_->echo_control_mobile->is_enabled(),
+      !!private_submodules_->echo_cancellation,
+      !!private_submodules_->echo_control_mobile,
       config_.residual_echo_detector.enabled,
       public_submodules_->noise_suppression->is_enabled(),
       public_submodules_->gain_control->is_enabled(),
@@ -1862,8 +1874,6 @@ void AudioProcessingImpl::InitializeEchoController() {
         proc_split_sample_rate_hz(), num_reverse_channels(),
         num_output_channels());
 
-    private_submodules_->echo_control_mobile->Enable(true);
-
     private_submodules_->echo_cancellation.reset();
     aec_render_signal_queue_.reset();
     return;
@@ -1898,8 +1908,6 @@ void AudioProcessingImpl::InitializeEchoController() {
   private_submodules_->echo_cancellation->Initialize(
       proc_sample_rate_hz(), num_reverse_channels(), num_output_channels(),
       num_proc_channels());
-
-  private_submodules_->echo_cancellation->Enable(true);
 
   private_submodules_->echo_cancellation->set_suppression_level(
       config_.echo_canceller.legacy_moderate_suppression_level
@@ -1951,79 +1959,7 @@ void AudioProcessingImpl::InitializePreProcessor() {
   }
 }
 
-void AudioProcessingImpl::MaybeUpdateHistograms() {
-  static const int kMinDiffDelayMs = 60;
-
-  if (private_submodules_->echo_cancellation &&
-      private_submodules_->echo_cancellation->is_enabled()) {
-    // Activate delay_jumps_ counters if we know echo_cancellation is running.
-    // If a stream has echo we know that the echo_cancellation is in process.
-    if (capture_.stream_delay_jumps == -1 &&
-        private_submodules_->echo_cancellation->stream_has_echo()) {
-      capture_.stream_delay_jumps = 0;
-    }
-    if (capture_.aec_system_delay_jumps == -1 &&
-        private_submodules_->echo_cancellation->stream_has_echo()) {
-      capture_.aec_system_delay_jumps = 0;
-    }
-
-    // Detect a jump in platform reported system delay and log the difference.
-    const int diff_stream_delay_ms =
-        capture_nonlocked_.stream_delay_ms - capture_.last_stream_delay_ms;
-    if (diff_stream_delay_ms > kMinDiffDelayMs &&
-        capture_.last_stream_delay_ms != 0) {
-      RTC_HISTOGRAM_COUNTS("WebRTC.Audio.PlatformReportedStreamDelayJump",
-                           diff_stream_delay_ms, kMinDiffDelayMs, 1000, 100);
-      if (capture_.stream_delay_jumps == -1) {
-        capture_.stream_delay_jumps = 0;  // Activate counter if needed.
-      }
-      capture_.stream_delay_jumps++;
-    }
-    capture_.last_stream_delay_ms = capture_nonlocked_.stream_delay_ms;
-
-    // Detect a jump in AEC system delay and log the difference.
-    const int samples_per_ms =
-        rtc::CheckedDivExact(capture_nonlocked_.split_rate, 1000);
-    RTC_DCHECK_LT(0, samples_per_ms);
-    const int aec_system_delay_ms =
-        private_submodules_->echo_cancellation->GetSystemDelayInSamples() /
-        samples_per_ms;
-    const int diff_aec_system_delay_ms =
-        aec_system_delay_ms - capture_.last_aec_system_delay_ms;
-    if (diff_aec_system_delay_ms > kMinDiffDelayMs &&
-        capture_.last_aec_system_delay_ms != 0) {
-      RTC_HISTOGRAM_COUNTS("WebRTC.Audio.AecSystemDelayJump",
-                           diff_aec_system_delay_ms, kMinDiffDelayMs, 1000,
-                           100);
-      if (capture_.aec_system_delay_jumps == -1) {
-        capture_.aec_system_delay_jumps = 0;  // Activate counter if needed.
-      }
-      capture_.aec_system_delay_jumps++;
-    }
-    capture_.last_aec_system_delay_ms = aec_system_delay_ms;
-  }
-}
-
-void AudioProcessingImpl::UpdateHistogramsOnCallEnd() {
-  // Run in a single-threaded manner.
-  rtc::CritScope cs_render(&crit_render_);
-  rtc::CritScope cs_capture(&crit_capture_);
-
-  if (capture_.stream_delay_jumps > -1) {
-    RTC_HISTOGRAM_ENUMERATION(
-        "WebRTC.Audio.NumOfPlatformReportedStreamDelayJumps",
-        capture_.stream_delay_jumps, 51);
-  }
-  capture_.stream_delay_jumps = -1;
-  capture_.last_stream_delay_ms = 0;
-
-  if (capture_.aec_system_delay_jumps > -1) {
-    RTC_HISTOGRAM_ENUMERATION("WebRTC.Audio.NumOfAecSystemDelayJumps",
-                              capture_.aec_system_delay_jumps, 51);
-  }
-  capture_.aec_system_delay_jumps = -1;
-  capture_.last_aec_system_delay_ms = 0;
-}
+void AudioProcessingImpl::UpdateHistogramsOnCallEnd() {}
 
 void AudioProcessingImpl::WriteAecDumpConfigMessage(bool forced) {
   if (!aec_dump_) {
@@ -2065,9 +2001,7 @@ void AudioProcessingImpl::WriteAecDumpConfigMessage(bool forced) {
                 private_submodules_->echo_cancellation->suppression_level())
           : 0;
 
-  apm_config.aecm_enabled =
-      private_submodules_->echo_control_mobile &&
-      private_submodules_->echo_control_mobile->is_enabled();
+  apm_config.aecm_enabled = !!private_submodules_->echo_control_mobile;
   apm_config.aecm_comfort_noise_enabled =
       private_submodules_->echo_control_mobile &&
       private_submodules_->echo_control_mobile->is_comfort_noise_enabled();
@@ -2160,12 +2094,8 @@ void AudioProcessingImpl::RecordAudioProcessingState() {
 
 AudioProcessingImpl::ApmCaptureState::ApmCaptureState(
     bool transient_suppressor_enabled)
-    : aec_system_delay_jumps(-1),
-      delay_offset_ms(0),
+    : delay_offset_ms(0),
       was_stream_delay_set(false),
-      last_stream_delay_ms(0),
-      last_aec_system_delay_ms(0),
-      stream_delay_jumps(-1),
       output_will_be_muted(false),
       key_pressed(false),
       transient_suppressor_enabled(transient_suppressor_enabled),
@@ -2173,7 +2103,9 @@ AudioProcessingImpl::ApmCaptureState::ApmCaptureState(
       split_rate(kSampleRate16kHz),
       echo_path_gain_change(false),
       prev_analog_mic_level(-1),
-      prev_pre_amp_gain(-1.f) {}
+      prev_pre_amp_gain(-1.f),
+      playout_volume(-1),
+      prev_playout_volume(-1) {}
 
 AudioProcessingImpl::ApmCaptureState::~ApmCaptureState() = default;
 

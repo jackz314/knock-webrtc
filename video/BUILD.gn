@@ -171,8 +171,8 @@ rtc_source_set("video_stream_encoder_impl") {
     "encoder_bitrate_adjuster.h",
     "encoder_overshoot_detector.cc",
     "encoder_overshoot_detector.h",
-    "frame_encode_timer.cc",
-    "frame_encode_timer.h",
+    "frame_encode_metadata_writer.cc",
+    "frame_encode_metadata_writer.h",
     "overuse_frame_detector.cc",
     "overuse_frame_detector.h",
     "video_stream_encoder.cc",
@@ -205,6 +205,7 @@ rtc_source_set("video_stream_encoder_impl") {
     "../rtc_base:rtc_task_queue",
     "../rtc_base:timeutils",
     "../rtc_base/experiments:alr_experiment",
+    "../rtc_base/experiments:balanced_degradation_settings",
     "../rtc_base/experiments:field_trial_parser",
     "../rtc_base/experiments:quality_scaling_experiment",
     "../rtc_base/experiments:rate_control_settings",
@@ -246,6 +247,8 @@ if (rtc_include_tests) {
     deps = [
       ":frame_dumping_decoder",
       "../api:fec_controller_api",
+      "../api:libjingle_peerconnection_api",
+      "../api:rtc_event_log_output_file",
       "../api:test_dependency_factory",
       "../api:video_quality_test_fixture_api",
       "../api/task_queue",
@@ -258,7 +261,6 @@ if (rtc_include_tests) {
       "../common_video",
       "../logging:rtc_event_log_api",
       "../logging:rtc_event_log_impl_base",
-      "../logging:rtc_event_log_impl_output",
       "../media:rtc_audio_video",
       "../media:rtc_encoder_simulcast_proxy",
       "../media:rtc_internal_video_codecs",
@@ -320,6 +322,30 @@ if (rtc_include_tests) {
       "../test:test_common",
       "../test:test_support",
       "//testing/gtest",
+      "//third_party/abseil-cpp/absl/memory",
+    ]
+  }
+
+  rtc_source_set("video_pc_full_stack_tests") {
+    testonly = true
+
+    sources = [
+      "pc_full_stack_tests.cc",
+    ]
+    deps = [
+      "../api:create_network_emulation_manager",
+      "../api:create_peerconnection_quality_test_fixture",
+      "../api:network_emulation_manager_api",
+      "../api:peer_connection_quality_test_fixture_api",
+      "../api:simulated_network_api",
+      "../call:simulated_network",
+      "../media:rtc_vp9_profile",
+      "../modules/video_coding:webrtc_vp9",
+      "../system_wrappers:field_trial",
+      "../test:field_trial",
+      "../test:fileutils",
+      "../test:test_support",
+      "../test/pc/e2e:network_quality_metrics_reporter",
       "//third_party/abseil-cpp/absl/memory",
     ]
   }
@@ -491,7 +517,7 @@ if (rtc_include_tests) {
       "end_to_end_tests/ssrc_tests.cc",
       "end_to_end_tests/stats_tests.cc",
       "end_to_end_tests/transport_feedback_tests.cc",
-      "frame_encode_timer_unittest.cc",
+      "frame_encode_metadata_writer_unittest.cc",
       "overuse_frame_detector_unittest.cc",
       "picture_id_tests.cc",
       "quality_scaling_tests.cc",
@@ -522,6 +548,7 @@ if (rtc_include_tests) {
       "../api/task_queue:default_task_queue_factory",
       "../api/test/video:function_video_factory",
       "../api/units:data_rate",
+      "../api/units:timestamp",
       "../api/video:builtin_video_bitrate_allocator_factory",
       "../api/video:encoded_image",
       "../api/video:video_bitrate_allocation",

@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "absl/memory/memory.h"
+#include "api/array_view.h"
 #include "api/transport/field_trial_based_config.h"
 #include "call/rtp_transport_controller_send_interface.h"
 #include "modules/pacing/packet_router.h"
@@ -48,10 +49,6 @@ RtpStreamSender::~RtpStreamSender() = default;
 
 namespace {
 static const int kMinSendSidePacketHistorySize = 600;
-// Assume an average video stream has around 3 packets per frame (1 mbps / 30
-// fps / 1400B) A sequence number set with size 5500 will be able to store
-// packet sequence number for at least last 60 seconds.
-static const int kSendSideSeqNumSetMaxSize = 5500;
 // We don't do MTU discovery, so assume that we have the standard ethernet MTU.
 static const size_t kPathMTU = 1500;
 
@@ -191,19 +188,13 @@ std::unique_ptr<FlexfecSender> MaybeCreateFlexfecSender(
       RTPSender::FecExtensionSizes(), rtp_state, clock);
 }
 
-uint32_t CalculateOverheadRateBps(int packets_per_second,
-                                  size_t overhead_bytes_per_packet,
-                                  uint32_t max_overhead_bps) {
-  uint32_t overhead_bps =
-      static_cast<uint32_t>(8 * overhead_bytes_per_packet * packets_per_second);
-  return std::min(overhead_bps, max_overhead_bps);
-}
-
-int CalculatePacketRate(uint32_t bitrate_bps, size_t packet_size_bytes) {
-  size_t packet_size_bits = 8 * packet_size_bytes;
-  // Ceil for int value of bitrate_bps / packet_size_bits.
-  return static_cast<int>((bitrate_bps + packet_size_bits - 1) /
-                          packet_size_bits);
+DataRate CalculateMinOverheadRate(DataRate bitrate,
+                                  DataSize overhead_per_packet,
+                                  DataSize max_packet_size) {
+  TimeDelta packet_interval = max_packet_size / bitrate;
+  int packets_per_second =
+      rtc::dchecked_cast<int>(std::ceil(1 / packet_interval.seconds<double>()));
+  return packets_per_second * overhead_per_packet / TimeDelta::Seconds<1>();
 }
 }  // namespace
 
@@ -258,10 +249,10 @@ RtpVideoSender::RtpVideoSender(
       encoder_target_rate_bps_(0),
       frame_counts_(rtp_config.ssrcs.size()),
       frame_count_observer_(observers.frame_count_observer) {
-  RTC_DCHECK_EQ(rtp_config.ssrcs.size(), rtp_streams_.size());
+  RTC_DCHECK_EQ(rtp_config_.ssrcs.size(), rtp_streams_.size());
   module_process_thread_checker_.Detach();
   // SSRCs are assumed to be sorted in the same order as |rtp_modules|.
-  for (uint32_t ssrc : rtp_config.ssrcs) {
+  for (uint32_t ssrc : rtp_config_.ssrcs) {
     // Restore state if it previously existed.
     const RtpPayloadState* state = nullptr;
     auto it = states.find(ssrc);
@@ -295,27 +286,28 @@ RtpVideoSender::RtpVideoSender(
     }
   }
 
-  ConfigureProtection(rtp_config);
-  ConfigureSsrcs(rtp_config);
-  ConfigureRids(rtp_config);
+  ConfigureProtection();
+  ConfigureSsrcs();
+  ConfigureRids();
 
-  if (!rtp_config.mid.empty()) {
+  if (!rtp_config_.mid.empty()) {
     for (const RtpStreamSender& stream : rtp_streams_) {
-      stream.rtp_rtcp->SetMid(rtp_config.mid);
+      stream.rtp_rtcp->SetMid(rtp_config_.mid);
     }
   }
 
   for (const RtpStreamSender& stream : rtp_streams_) {
     // Simulcast has one module for each layer. Set the CNAME on all modules.
-    stream.rtp_rtcp->SetCNAME(rtp_config.c_name.c_str());
+    stream.rtp_rtcp->SetCNAME(rtp_config_.c_name.c_str());
     stream.rtp_rtcp->RegisterRtcpStatisticsCallback(observers.rtcp_stats);
     stream.rtp_rtcp->RegisterSendChannelRtpStatisticsCallback(
         observers.rtp_stats);
-    stream.rtp_rtcp->SetMaxRtpPacketSize(rtp_config.max_packet_size);
-    stream.rtp_rtcp->RegisterSendPayloadFrequency(rtp_config.payload_type,
+    stream.rtp_rtcp->SetMaxRtpPacketSize(rtp_config_.max_packet_size);
+    stream.rtp_rtcp->RegisterSendPayloadFrequency(rtp_config_.payload_type,
                                                   kVideoPayloadTypeFrequency);
-    stream.sender_video->RegisterPayloadType(rtp_config.payload_type,
-                                             rtp_config.payload_name);
+    stream.sender_video->RegisterPayloadType(rtp_config_.payload_type,
+                                             rtp_config_.payload_name,
+                                             rtp_config_.raw_payload);
   }
   // Currently, both ULPFEC and FlexFEC use the same FEC rate calculation logic,
   // so enable that logic if either of those FEC schemes are enabled.
@@ -323,18 +315,14 @@ RtpVideoSender::RtpVideoSender(
 
   fec_controller_->SetProtectionCallback(this);
   // Signal congestion controller this object is ready for OnPacket* callbacks.
-  if (fec_controller_->UseLossVectorMask()) {
-    transport_->RegisterPacketFeedbackObserver(this);
-  }
+  transport_->RegisterPacketFeedbackObserver(this);
 }
 
 RtpVideoSender::~RtpVideoSender() {
   for (const RtpStreamSender& stream : rtp_streams_) {
     transport_->packet_router()->RemoveSendRtpModule(stream.rtp_rtcp.get());
   }
-  if (fec_controller_->UseLossVectorMask()) {
-    transport_->DeRegisterPacketFeedbackObserver(this);
-  }
+  transport_->DeRegisterPacketFeedbackObserver(this);
 }
 
 void RtpVideoSender::RegisterProcessThread(
@@ -476,14 +464,14 @@ void RtpVideoSender::OnBitrateAllocationUpdated(
   }
 }
 
-void RtpVideoSender::ConfigureProtection(const RtpConfig& rtp_config) {
+void RtpVideoSender::ConfigureProtection() {
   // Consistency of FlexFEC parameters is checked in MaybeCreateFlexfecSender.
   const bool flexfec_enabled = (flexfec_sender_ != nullptr);
 
   // Consistency of NACK and RED+ULPFEC parameters is checked in this function.
-  const bool nack_enabled = rtp_config.nack.rtp_history_ms > 0;
-  int red_payload_type = rtp_config.ulpfec.red_payload_type;
-  int ulpfec_payload_type = rtp_config.ulpfec.ulpfec_payload_type;
+  const bool nack_enabled = rtp_config_.nack.rtp_history_ms > 0;
+  int red_payload_type = rtp_config_.ulpfec.red_payload_type;
+  int ulpfec_payload_type = rtp_config_.ulpfec.ulpfec_payload_type;
 
   // Shorthands.
   auto IsRedEnabled = [&]() { return red_payload_type >= 0; };
@@ -512,7 +500,7 @@ void RtpVideoSender::ConfigureProtection(const RtpConfig& rtp_config) {
   // is a waste of bandwidth since FEC packets still have to be transmitted.
   // Note that this is not the case with FlexFEC.
   if (nack_enabled && IsUlpfecEnabled() &&
-      !PayloadTypeSupportsSkippingFecPackets(rtp_config.payload_name)) {
+      !PayloadTypeSupportsSkippingFecPackets(rtp_config_.payload_name)) {
     RTC_LOG(LS_WARNING)
         << "Transmitting payload type without picture ID using "
            "NACK+ULPFEC is a waste of bandwidth since ULPFEC packets "
@@ -565,10 +553,11 @@ void RtpVideoSender::DeliverRtcp(const uint8_t* packet, size_t length) {
     stream.rtp_rtcp->IncomingRtcpPacket(packet, length);
 }
 
-void RtpVideoSender::ConfigureSsrcs(const RtpConfig& rtp_config) {
+void RtpVideoSender::ConfigureSsrcs() {
   // Configure regular SSRCs.
-  for (size_t i = 0; i < rtp_config.ssrcs.size(); ++i) {
-    uint32_t ssrc = rtp_config.ssrcs[i];
+  RTC_CHECK(ssrc_to_acknowledged_packets_observers_.empty());
+  for (size_t i = 0; i < rtp_config_.ssrcs.size(); ++i) {
+    uint32_t ssrc = rtp_config_.ssrcs[i];
     RtpRtcp* const rtp_rtcp = rtp_streams_[i].rtp_rtcp.get();
     rtp_rtcp->SetSSRC(ssrc);
 
@@ -576,16 +565,21 @@ void RtpVideoSender::ConfigureSsrcs(const RtpConfig& rtp_config) {
     auto it = suspended_ssrcs_.find(ssrc);
     if (it != suspended_ssrcs_.end())
       rtp_rtcp->SetRtpState(it->second);
+
+    AcknowledgedPacketsObserver* receive_observer =
+        rtp_rtcp->GetAcknowledgedPacketsObserver();
+    RTC_DCHECK(receive_observer != nullptr);
+    ssrc_to_acknowledged_packets_observers_[ssrc] = receive_observer;
   }
 
   // Set up RTX if available.
-  if (rtp_config.rtx.ssrcs.empty())
+  if (rtp_config_.rtx.ssrcs.empty())
     return;
 
   // Configure RTX SSRCs.
-  RTC_DCHECK_EQ(rtp_config.rtx.ssrcs.size(), rtp_config.ssrcs.size());
-  for (size_t i = 0; i < rtp_config.rtx.ssrcs.size(); ++i) {
-    uint32_t ssrc = rtp_config.rtx.ssrcs[i];
+  RTC_DCHECK_EQ(rtp_config_.rtx.ssrcs.size(), rtp_config_.ssrcs.size());
+  for (size_t i = 0; i < rtp_config_.rtx.ssrcs.size(); ++i) {
+    uint32_t ssrc = rtp_config_.rtx.ssrcs[i];
     RtpRtcp* const rtp_rtcp = rtp_streams_[i].rtp_rtcp.get();
     rtp_rtcp->SetRtxSsrc(ssrc);
     auto it = suspended_ssrcs_.find(ssrc);
@@ -594,30 +588,30 @@ void RtpVideoSender::ConfigureSsrcs(const RtpConfig& rtp_config) {
   }
 
   // Configure RTX payload types.
-  RTC_DCHECK_GE(rtp_config.rtx.payload_type, 0);
+  RTC_DCHECK_GE(rtp_config_.rtx.payload_type, 0);
   for (const RtpStreamSender& stream : rtp_streams_) {
-    stream.rtp_rtcp->SetRtxSendPayloadType(rtp_config.rtx.payload_type,
-                                           rtp_config.payload_type);
+    stream.rtp_rtcp->SetRtxSendPayloadType(rtp_config_.rtx.payload_type,
+                                           rtp_config_.payload_type);
     stream.rtp_rtcp->SetRtxSendStatus(kRtxRetransmitted |
                                       kRtxRedundantPayloads);
   }
-  if (rtp_config.ulpfec.red_payload_type != -1 &&
-      rtp_config.ulpfec.red_rtx_payload_type != -1) {
+  if (rtp_config_.ulpfec.red_payload_type != -1 &&
+      rtp_config_.ulpfec.red_rtx_payload_type != -1) {
     for (const RtpStreamSender& stream : rtp_streams_) {
       stream.rtp_rtcp->SetRtxSendPayloadType(
-          rtp_config.ulpfec.red_rtx_payload_type,
-          rtp_config.ulpfec.red_payload_type);
+          rtp_config_.ulpfec.red_rtx_payload_type,
+          rtp_config_.ulpfec.red_payload_type);
     }
   }
 }
 
-void RtpVideoSender::ConfigureRids(const RtpConfig& rtp_config) {
-  RTC_DCHECK(rtp_config.rids.empty() ||
-             rtp_config.rids.size() == rtp_config.ssrcs.size());
-  RTC_DCHECK(rtp_config.rids.empty() ||
-             rtp_config.rids.size() == rtp_streams_.size());
-  for (size_t i = 0; i < rtp_config.rids.size(); ++i) {
-    const std::string& rid = rtp_config.rids[i];
+void RtpVideoSender::ConfigureRids() {
+  RTC_DCHECK(rtp_config_.rids.empty() ||
+             rtp_config_.rids.size() == rtp_config_.ssrcs.size());
+  RTC_DCHECK(rtp_config_.rids.empty() ||
+             rtp_config_.rids.size() == rtp_streams_.size());
+  for (size_t i = 0; i < rtp_config_.rids.size(); ++i) {
+    const std::string& rid = rtp_config_.rids[i];
     rtp_streams_[i].rtp_rtcp->SetRid(rid);
   }
 }
@@ -686,16 +680,17 @@ void RtpVideoSender::OnBitrateUpdated(uint32_t bitrate_bps,
                                       int framerate) {
   // Substract overhead from bitrate.
   rtc::CritScope lock(&crit_);
+  DataSize packet_overhead = DataSize::bytes(
+      overhead_bytes_per_packet_ + transport_overhead_bytes_per_packet_);
+  DataSize max_total_packet_size = DataSize::bytes(
+      rtp_config_.max_packet_size + transport_overhead_bytes_per_packet_);
   uint32_t payload_bitrate_bps = bitrate_bps;
   if (send_side_bwe_with_overhead_) {
-    uint32_t overhead_bps = CalculateOverheadRateBps(
-        CalculatePacketRate(
-            bitrate_bps,
-            rtp_config_.max_packet_size + transport_overhead_bytes_per_packet_),
-        overhead_bytes_per_packet_ + transport_overhead_bytes_per_packet_,
-        bitrate_bps);
-    RTC_DCHECK_LE(overhead_bps, bitrate_bps);
-    payload_bitrate_bps = bitrate_bps - overhead_bps;
+    DataRate overhead_rate = CalculateMinOverheadRate(
+        DataRate::bps(bitrate_bps), packet_overhead, max_total_packet_size);
+    // TODO(srte): We probably should not accept 0 payload bitrate here.
+    payload_bitrate_bps =
+        rtc::saturated_cast<uint32_t>(bitrate_bps - overhead_rate.bps());
   }
 
   // Get the encoder target rate. It is the estimated network rate -
@@ -716,18 +711,16 @@ void RtpVideoSender::OnBitrateUpdated(uint32_t bitrate_bps,
 
   loss_mask_vector_.clear();
 
-  uint32_t encoder_overhead_rate_bps =
-      send_side_bwe_with_overhead_
-          ? CalculateOverheadRateBps(
-                CalculatePacketRate(encoder_target_rate_bps_,
-                                    rtp_config_.max_packet_size +
-                                        transport_overhead_bytes_per_packet_ -
-                                        overhead_bytes_per_packet_),
-                overhead_bytes_per_packet_ +
-                    transport_overhead_bytes_per_packet_,
-                bitrate_bps - encoder_target_rate_bps_)
-          : 0;
-
+  uint32_t encoder_overhead_rate_bps = 0;
+  if (send_side_bwe_with_overhead_) {
+    // TODO(srte): The packet size should probably match the one used above.
+    DataRate encoder_overhead_rate = CalculateMinOverheadRate(
+        DataRate::bps(encoder_target_rate_bps_), packet_overhead,
+        max_total_packet_size - DataSize::bytes(overhead_bytes_per_packet_));
+    encoder_overhead_rate_bps =
+        std::min(encoder_overhead_rate.bps<uint32_t>(),
+                 bitrate_bps - encoder_target_rate_bps_);
+  }
   // When the field trial "WebRTC-SendSideBwe-WithOverhead" is enabled
   // protection_bitrate includes overhead.
   const uint32_t media_rate = encoder_target_rate_bps_ +
@@ -777,29 +770,45 @@ int RtpVideoSender::ProtectionRequest(const FecProtectionParams* delta_params,
   return 0;
 }
 
-void RtpVideoSender::OnPacketAdded(uint32_t ssrc, uint16_t seq_num) {
-  const auto ssrcs = rtp_config_.ssrcs;
-  if (std::find(ssrcs.begin(), ssrcs.end(), ssrc) != ssrcs.end()) {
-    feedback_packet_seq_num_set_.insert(seq_num);
-    if (feedback_packet_seq_num_set_.size() > kSendSideSeqNumSetMaxSize) {
-      RTC_LOG(LS_WARNING) << "Feedback packet sequence number set exceed it's "
-                             "max size', will get reset.";
-      feedback_packet_seq_num_set_.clear();
-    }
-  }
-}
-
 void RtpVideoSender::OnPacketFeedbackVector(
     const std::vector<PacketFeedback>& packet_feedback_vector) {
-  rtc::CritScope lock(&crit_);
-  // Lost feedbacks are not considered to be lost packets.
-  for (const PacketFeedback& packet : packet_feedback_vector) {
-    auto it = feedback_packet_seq_num_set_.find(packet.sequence_number);
-    if (it != feedback_packet_seq_num_set_.end()) {
-      const bool lost = packet.arrival_time_ms == PacketFeedback::kNotReceived;
-      loss_mask_vector_.push_back(lost);
-      feedback_packet_seq_num_set_.erase(it);
+  if (fec_controller_->UseLossVectorMask()) {
+    rtc::CritScope cs(&crit_);
+    for (const PacketFeedback& packet : packet_feedback_vector) {
+      if (packet.send_time_ms == PacketFeedback::kNoSendTime || !packet.ssrc ||
+          std::find(rtp_config_.ssrcs.begin(), rtp_config_.ssrcs.end(),
+                    *packet.ssrc) == rtp_config_.ssrcs.end()) {
+        // If packet send time is missing, the feedback for this packet has
+        // probably already been processed, so ignore it.
+        // If packet does not belong to a registered media ssrc, we are also
+        // not interested in it.
+        continue;
+      }
+      loss_mask_vector_.push_back(packet.arrival_time_ms ==
+                                  PacketFeedback::kNotReceived);
     }
+  }
+
+  // Map from SSRC to all acked packets for that RTP module.
+  std::map<uint32_t, std::vector<uint16_t>> acked_packets_per_ssrc;
+  for (const PacketFeedback& packet : packet_feedback_vector) {
+    if (packet.ssrc && packet.arrival_time_ms != PacketFeedback::kNotReceived) {
+      acked_packets_per_ssrc[*packet.ssrc].push_back(
+          packet.rtp_sequence_number);
+    }
+  }
+
+  for (const auto& kv : acked_packets_per_ssrc) {
+    const uint32_t ssrc = kv.first;
+    if (ssrc_to_acknowledged_packets_observers_.find(ssrc) ==
+        ssrc_to_acknowledged_packets_observers_.end()) {
+      // Packets not for a media SSRC, so likely RTX or FEC. If so, ignore
+      // since there's no RTP history to clean up anyway.
+      continue;
+    }
+    rtc::ArrayView<const uint16_t> rtp_sequence_numbers(kv.second);
+    ssrc_to_acknowledged_packets_observers_[ssrc]->OnPacketsAcknowledged(
+        rtp_sequence_numbers);
   }
 }
 

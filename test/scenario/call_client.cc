@@ -12,8 +12,9 @@
 #include <utility>
 
 #include "absl/memory/memory.h"
+#include "api/rtc_event_log/rtc_event_log.h"
+#include "api/rtc_event_log/rtc_event_log_factory.h"
 #include "modules/audio_mixer/audio_mixer_impl.h"
-#include "modules/congestion_controller/goog_cc/test/goog_cc_printer.h"
 
 namespace webrtc {
 namespace test {
@@ -75,10 +76,10 @@ std::unique_ptr<RtcEventLog> CreateEventLog(
     TaskQueueFactory* task_queue_factory,
     LogWriterFactoryInterface* log_writer_factory) {
   if (!log_writer_factory) {
-    return RtcEventLog::CreateNull();
+    return absl::make_unique<RtcEventLogNull>();
   }
-  auto event_log = RtcEventLog::Create(RtcEventLog::EncodingType::NewFormat,
-                                       task_queue_factory);
+  auto event_log = RtcEventLogFactory(task_queue_factory)
+                       .CreateRtcEventLog(RtcEventLog::EncodingType::NewFormat);
   bool success = event_log->StartLogging(log_writer_factory->Create(".rtc.dat"),
                                          kEventLogOutputIntervalMs);
   RTC_CHECK(success);
@@ -96,18 +97,11 @@ LoggingNetworkControllerFactory::LoggingNetworkControllerFactory(
           << "Can't log controller state for injected network controllers";
   } else {
     if (log_writer_factory) {
-      auto goog_printer = absl::make_unique<GoogCcStatePrinter>();
-      owned_cc_factory_.reset(new GoogCcDebugFactory(goog_printer.get()));
-      cc_factory_ = owned_cc_factory_.get();
-      cc_printer_.reset(
-          new ControlStatePrinter(log_writer_factory->Create(".cc_state.txt"),
-                                  std::move(goog_printer)));
-      cc_printer_->PrintHeaders();
-    } else {
-      owned_cc_factory_.reset(
-          new GoogCcNetworkControllerFactory(GoogCcFactoryConfig()));
-      cc_factory_ = owned_cc_factory_.get();
+      goog_cc_factory_.AttachWriter(
+          log_writer_factory->Create(".cc_state.txt"));
+      print_cc_state_ = true;
     }
+    cc_factory_ = &goog_cc_factory_;
   }
 }
 
@@ -116,8 +110,8 @@ LoggingNetworkControllerFactory::~LoggingNetworkControllerFactory() {
 
 void LoggingNetworkControllerFactory::LogCongestionControllerStats(
     Timestamp at_time) {
-  if (cc_printer_)
-    cc_printer_->PrintState(at_time);
+  if (print_cc_state_)
+    goog_cc_factory_.PrintState(at_time);
 }
 
 std::unique_ptr<NetworkControllerInterface>
@@ -156,6 +150,9 @@ CallClient::~CallClient() {
   SendTask([&] {
     call_.reset();
     fake_audio_setup_ = {};
+    rtc::Event done;
+    event_log_->StopLogging([&done] { done.Set(); });
+    done.Wait(rtc::Event::kForever);
     event_log_.reset();
   });
 }

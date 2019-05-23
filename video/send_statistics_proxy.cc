@@ -678,7 +678,7 @@ void SendStatisticsProxy::OnEncodedFrameTimeMeasured(int encode_time_ms,
   rtc::CritScope lock(&crit_);
   uma_container_->encode_time_counter_.Add(encode_time_ms);
   encode_time_.Apply(1.0f, encode_time_ms);
-  stats_.avg_encode_time_ms = round(encode_time_.filtered());
+  stats_.avg_encode_time_ms = std::round(encode_time_.filtered());
   stats_.total_encode_time_ms += encode_time_ms;
   stats_.encode_usage_percent = encode_usage_percent;
 }
@@ -896,6 +896,18 @@ void SendStatisticsProxy::OnSendEncodedImage(
 
   rtc::CritScope lock(&crit_);
   ++stats_.frames_encoded;
+  // The current encode frame rate is based on previously encoded frames.
+  double encode_frame_rate = encoded_frame_rate_tracker_.ComputeRate();
+  // We assume that less than 1 FPS is not a trustworthy estimate - perhaps we
+  // just started encoding for the first time or after a pause. Assuming frame
+  // rate is at least 1 FPS is conservative to avoid too large increments.
+  if (encode_frame_rate < 1.0)
+    encode_frame_rate = 1.0;
+  double target_frame_size_bytes =
+      stats_.target_media_bitrate_bps / (8.0 * encode_frame_rate);
+  // |stats_.target_media_bitrate_bps| is set in
+  // SendStatisticsProxy::OnSetEncoderTargetRate.
+  stats_.total_encoded_bytes_target += round(target_frame_size_bytes);
   if (codec_info) {
     UpdateEncoderFallbackStats(
         codec_info, encoded_image._encodedWidth * encoded_image._encodedHeight,
@@ -1184,6 +1196,7 @@ void SendStatisticsProxy::FrameCountUpdated(const FrameCounts& frame_counts,
 
 void SendStatisticsProxy::SendSideDelayUpdated(int avg_delay_ms,
                                                int max_delay_ms,
+                                               uint64_t total_delay_ms,
                                                uint32_t ssrc) {
   rtc::CritScope lock(&crit_);
   VideoSendStream::StreamStats* stats = GetStatsEntry(ssrc);
@@ -1191,6 +1204,7 @@ void SendStatisticsProxy::SendSideDelayUpdated(int avg_delay_ms,
     return;
   stats->avg_delay_ms = avg_delay_ms;
   stats->max_delay_ms = max_delay_ms;
+  stats->total_packet_send_delay_ms = total_delay_ms;
 
   uma_container_->delay_counter_.Add(avg_delay_ms);
   uma_container_->max_delay_counter_.Add(max_delay_ms);

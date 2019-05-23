@@ -54,7 +54,7 @@ constexpr double kLowRateFactor = 1.0;
 constexpr double kHighRateFactor = 2.0;
 
 // These settings correspond to the settings in vpx_codec_enc_cfg.
-struct Vp8RateSettings {
+struct Vp9RateSettings {
   uint32_t rc_undershoot_pct;
   uint32_t rc_overshoot_pct;
   uint32_t rc_buf_sz;
@@ -161,9 +161,9 @@ uint32_t Interpolate(uint32_t low,
   return static_cast<uint32_t>(((1.0 - factor) * low) + (factor * high) + 0.5);
 }
 
-Vp8RateSettings GetRateSettings(double bandwidth_headroom_factor) {
-  static const Vp8RateSettings low_settings{1000u, 0u, 100u, 30u, 40u};
-  static const Vp8RateSettings high_settings{100u, 15u, 1000u, 600u, 5u};
+Vp9RateSettings GetRateSettings(double bandwidth_headroom_factor) {
+  static const Vp9RateSettings low_settings{100u, 0u, 100u, 33u, 40u};
+  static const Vp9RateSettings high_settings{50u, 50u, 1000u, 700u, 5u};
 
   if (bandwidth_headroom_factor <= kLowRateFactor) {
     return low_settings;
@@ -171,7 +171,7 @@ Vp8RateSettings GetRateSettings(double bandwidth_headroom_factor) {
     return high_settings;
   }
 
-  Vp8RateSettings settings;
+  Vp9RateSettings settings;
   settings.rc_undershoot_pct =
       Interpolate(low_settings.rc_undershoot_pct,
                   high_settings.rc_undershoot_pct, bandwidth_headroom_factor);
@@ -191,7 +191,7 @@ Vp8RateSettings GetRateSettings(double bandwidth_headroom_factor) {
 }
 
 void UpdateRateSettings(vpx_codec_enc_cfg_t* config,
-                        const Vp8RateSettings& new_settings) {
+                        const Vp9RateSettings& new_settings) {
   config->rc_undershoot_pct = new_settings.rc_undershoot_pct;
   config->rc_overshoot_pct = new_settings.rc_overshoot_pct;
   config->rc_buf_sz = new_settings.rc_buf_sz;
@@ -912,7 +912,8 @@ int VP9EncoderImpl::Encode(const VideoFrame& input_image,
 
   // Keep reference to buffer until encode completes.
   rtc::scoped_refptr<I420BufferInterface> i420_buffer;
-  rtc::scoped_refptr<I010BufferInterface> i010_buffer;
+  const I010BufferInterface* i010_buffer;
+  rtc::scoped_refptr<const I010BufferInterface> i010_copy;
   switch (profile_) {
     case VP9Profile::kProfile0: {
       i420_buffer = input_image.video_frame_buffer()->ToI420();
@@ -935,8 +936,9 @@ int VP9EncoderImpl::Encode(const VideoFrame& input_image,
           break;
         }
         default: {
-          i010_buffer =
+          i010_copy =
               I010Buffer::Copy(*input_image.video_frame_buffer()->ToI420());
+          i010_buffer = i010_copy.get();
         }
       }
       raw_->planes[VPX_PLANE_Y] = const_cast<uint8_t*>(
@@ -1450,8 +1452,6 @@ void VP9EncoderImpl::DeliverBufferedFrame(bool end_of_picture) {
     frag_info.VerifyAndAllocateFragmentationHeader(1);
     frag_info.fragmentationOffset[part_idx] = 0;
     frag_info.fragmentationLength[part_idx] = encoded_image_.size();
-    frag_info.fragmentationPlType[part_idx] = 0;
-    frag_info.fragmentationTimeDiff[part_idx] = 0;
 
     encoded_complete_callback_->OnEncodedImage(encoded_image_, &codec_specific_,
                                                &frag_info);

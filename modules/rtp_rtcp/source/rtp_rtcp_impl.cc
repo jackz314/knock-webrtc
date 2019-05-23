@@ -407,11 +407,12 @@ bool ModuleRtpRtcpImpl::OnSendingRtpFrame(uint32_t timestamp,
   return true;
 }
 
-bool ModuleRtpRtcpImpl::TimeToSendPacket(uint32_t ssrc,
-                                         uint16_t sequence_number,
-                                         int64_t capture_time_ms,
-                                         bool retransmission,
-                                         const PacedPacketInfo& pacing_info) {
+RtpPacketSendResult ModuleRtpRtcpImpl::TimeToSendPacket(
+    uint32_t ssrc,
+    uint16_t sequence_number,
+    int64_t capture_time_ms,
+    bool retransmission,
+    const PacedPacketInfo& pacing_info) {
   return rtp_sender_->TimeToSendPacket(ssrc, sequence_number, capture_time_ms,
                                        retransmission, pacing_info);
 }
@@ -508,13 +509,6 @@ int64_t ModuleRtpRtcpImpl::ExpectedRetransmissionTimeMs() const {
 // Normal SR and RR are triggered via the process function.
 int32_t ModuleRtpRtcpImpl::SendRTCP(RTCPPacketType packet_type) {
   return rtcp_sender_.SendRTCP(GetFeedbackState(), packet_type);
-}
-
-// Force a send of an RTCP packet.
-// Normal SR and RR are triggered via the process function.
-int32_t ModuleRtpRtcpImpl::SendCompoundRTCP(
-    const std::set<RTCPPacketType>& packet_types) {
-  return rtcp_sender_.SendCompoundRTCP(GetFeedbackState(), packet_types);
 }
 
 int32_t ModuleRtpRtcpImpl::SetRTCPApplicationSpecificData(
@@ -865,6 +859,11 @@ void ModuleRtpRtcpImpl::RegisterSendChannelRtpStatisticsCallback(
 StreamDataCountersCallback*
 ModuleRtpRtcpImpl::GetSendChannelRtpStatisticsCallback() const {
   return rtp_sender_->GetRtpStatisticsCallback();
+}
+
+AcknowledgedPacketsObserver* ModuleRtpRtcpImpl::GetAcknowledgedPacketsObserver()
+    const {
+  return rtp_sender_.get();
 }
 
 void ModuleRtpRtcpImpl::SetVideoBitrateAllocation(

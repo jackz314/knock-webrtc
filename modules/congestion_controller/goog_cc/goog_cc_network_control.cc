@@ -103,7 +103,8 @@ GoogCcNetworkController::GoogCcNetworkController(NetworkControllerConfig config,
               : nullptr),
       bandwidth_estimation_(
           absl::make_unique<SendSideBandwidthEstimation>(event_log_)),
-      alr_detector_(absl::make_unique<AlrDetector>(key_value_config_)),
+      alr_detector_(
+          absl::make_unique<AlrDetector>(key_value_config_, config.event_log)),
       probe_bitrate_estimator_(new ProbeBitrateEstimator(config.event_log)),
       network_estimator_(std::move(goog_cc_config.network_state_estimator)),
       network_state_predictor_(
@@ -113,6 +114,7 @@ GoogCcNetworkController::GoogCcNetworkController(NetworkControllerConfig config,
                                          network_state_predictor_.get())),
       acknowledged_bitrate_estimator_(
           absl::make_unique<AcknowledgedBitrateEstimator>(key_value_config_)),
+      overuse_predictor_(key_value_config_),
       initial_config_(config),
       last_raw_target_rate_(*config.constraints.starting_rate),
       last_pushback_target_rate_(last_raw_target_rate_),
@@ -259,9 +261,24 @@ NetworkControlUpdate GoogCcNetworkController::OnSentPacket(
                                                 TimeDelta::Zero());
   }
   bandwidth_estimation_->OnSentPacket(sent_packet);
+  bool network_changed = false;
+  if (network_estimator_ && overuse_predictor_.Enabled()) {
+    overuse_predictor_.OnSentPacket(sent_packet);
+    auto estimate = network_estimator_->GetCurrentEstimate();
+    if (estimate && overuse_predictor_.PredictOveruse(*estimate)) {
+      DataRate new_target = delay_based_bwe_->TriggerOveruse(
+          sent_packet.send_time, acknowledged_bitrate_estimator_->bitrate());
+      bandwidth_estimation_->UpdateDelayBasedEstimate(sent_packet.send_time,
+                                                      new_target);
+      network_changed = true;
+    }
+  }
   if (congestion_window_pushback_controller_) {
     congestion_window_pushback_controller_->UpdateOutstandingData(
         sent_packet.data_in_flight.bytes());
+    network_changed = true;
+  }
+  if (network_changed) {
     NetworkControlUpdate update;
     MaybeTriggerOnNetworkChanged(&update, sent_packet.send_time);
     return update;

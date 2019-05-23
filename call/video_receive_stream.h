@@ -13,11 +13,13 @@
 
 #include <limits>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "api/call/transport.h"
 #include "api/crypto/crypto_options.h"
+#include "api/media_transport_config.h"
 #include "api/media_transport_interface.h"
 #include "api/rtp_headers.h"
 #include "api/rtp_parameters.h"
@@ -121,7 +123,7 @@ class VideoReceiveStream {
     Config() = delete;
     Config(Config&&);
     Config(Transport* rtcp_send_transport,
-           MediaTransportInterface* media_transport);
+           MediaTransportConfig media_transport_config);
     explicit Config(Transport* rtcp_send_transport);
     Config& operator=(Config&&);
     Config& operator=(const Config&) = delete;
@@ -131,6 +133,10 @@ class VideoReceiveStream {
     Config Copy() const { return Config(*this); }
 
     std::string ToString() const;
+
+    MediaTransportInterface* media_transport() const {
+      return media_transport_config.media_transport;
+    }
 
     // Decoders for every payload that we can receive.
     std::vector<Decoder> decoders;
@@ -190,6 +196,12 @@ class VideoReceiveStream {
       // For RTX to be enabled, both an SSRC and this mapping are needed.
       std::map<int, int> rtx_associated_payload_types;
 
+      // Payload types that should be depacketized using raw depacketizer
+      // (payload header will not be parsed and must not be present, additional
+      // meta data is expected to be present in generic frame descriptor
+      // RTP header extension).
+      std::set<int> raw_payload_types;
+
       // RTP header extensions used for the received stream.
       std::vector<RtpExtension> extensions;
     } rtp;
@@ -197,7 +209,7 @@ class VideoReceiveStream {
     // Transport for outgoing packets (RTCP).
     Transport* rtcp_send_transport = nullptr;
 
-    MediaTransportInterface* media_transport = nullptr;
+    MediaTransportConfig media_transport_config;
 
     // Must always be set.
     rtc::VideoSinkInterface<VideoFrame>* renderer = nullptr;
