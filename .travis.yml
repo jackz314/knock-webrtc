@@ -9,7 +9,7 @@ cache:
   - tools
   - third_party
   - testing
-  - ../.gclient_entries
+  - custom_cache
 install:
   true
 script:
@@ -22,13 +22,8 @@ script:
   - export PATH=$PATH:$HOME/webrtc-dep/depot_tools #this seems to only work outside of scripts
   #switch back to work directory
   - cd $TRAVIS_BUILD_DIR
-  #gclient stuff
-  - mv .gclient ../.gclient #move gclient to parent directory to use as config
-  - sed -i -e "s|'src/resources'],|'src/resources'],'condition':'rtc_include_tests==true',|" DEPS # not get resources when gclient sync
-  - mv `pwd` ../src #rename the current directory (repo root) to src so all the scripts work without problem
-  - gclient sync
-  - chmod u+x build-and-publish.sh
-  - ./build-and-publish.sh
+  - chmod u+x sync-build-publish.sh
+  - ./sync-build-publish.sh
 before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
