@@ -27,9 +27,8 @@ script:
   - sed -i -e "s|'src/resources'],|'src/resources'],'condition':'rtc_include_tests==true',|" DEPS # not get resources when gclient sync
   - mv `pwd` ../src #rename the current directory (repo root) to src so all the scripts work without problem
   - gclient sync
-  - chmod u+x tools_webrtc/android/build_aar.py
-  - ./tools_webrtc/android/build_aar.py
-  - [ $? -eq 0 ] && (chmod u+x publish-maven.sh && ./publish-maven.sh) || echo "aborting publish to maven since build failed" #publish to maven repo
+  - chmod u+x build-and-publish.sh
+  - ./build-and-publish.sh
 before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
