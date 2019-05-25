@@ -6,10 +6,10 @@ env:
 cache:
   directories:
   # gclient sync cache
-  - src/tools
-  - src/third_party
-  - src/testing
-  - .gclient_entries
+  - tools
+  - third_party
+  - testing
+  - ../.gclient_entries
 install:
   true
 script:
