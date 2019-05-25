@@ -19,6 +19,7 @@
 #include "api/units/timestamp.h"
 #include "call/rtp_transport_controller_send.h"
 #include "call/rtp_video_sender.h"
+#include "logging/rtc_event_log/events/rtc_event_route_change.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/location.h"
 #include "rtc_base/logging.h"
@@ -64,14 +65,14 @@ RtpTransportControllerSend::RtpTransportControllerSend(
     std::unique_ptr<ProcessThread> process_thread,
     TaskQueueFactory* task_queue_factory)
     : clock_(clock),
+      event_log_(event_log),
       pacer_(clock, &packet_router_, event_log),
       bitrate_configurator_(bitrate_config),
       process_thread_(std::move(process_thread)),
       observer_(nullptr),
       controller_factory_override_(controller_factory),
       controller_factory_fallback_(
-          absl::make_unique<GoogCcNetworkControllerFactory>(event_log,
-                                                            predictor_factory)),
+          absl::make_unique<GoogCcNetworkControllerFactory>(predictor_factory)),
       process_interval_(controller_factory_fallback_->GetProcessInterval()),
       last_report_block_time_(Timestamp::ms(clock_->TimeInMilliseconds())),
       reset_feedback_on_route_change_(
@@ -87,6 +88,8 @@ RtpTransportControllerSend::RtpTransportControllerSend(
           "rtp_send_controller",
           TaskQueueFactory::Priority::NORMAL)) {
   initial_config_.constraints = ConvertConstraints(bitrate_config, clock_);
+  initial_config_.event_log = event_log;
+  initial_config_.key_value_config = &trial_based_config_;
   RTC_DCHECK(bitrate_config.start_bitrate_bps > 0);
 
   pacer_.SetPacingRates(bitrate_config.start_bitrate_bps, 0);
@@ -243,6 +246,10 @@ void RtpTransportControllerSend::OnNetworkRouteChanged(
           network_route.local_network_id, network_route.remote_network_id);
     transport_overhead_bytes_per_packet_ = network_route.packet_overhead;
 
+    if (event_log_) {
+      event_log_->Log(absl::make_unique<RtcEventRouteChange>(
+          network_route.connected, network_route.packet_overhead));
+    }
     NetworkRouteChange msg;
     msg.at_time = Timestamp::ms(clock_->TimeInMilliseconds());
     msg.constraints = ConvertConstraints(bitrate_config, clock_);
@@ -407,15 +414,12 @@ void RtpTransportControllerSend::OnReceivedRtcpReceiverReport(
   });
 }
 
-void RtpTransportControllerSend::AddPacket(uint32_t ssrc,
-                                           uint16_t sequence_number,
-                                           size_t length,
-                                           const PacedPacketInfo& pacing_info) {
-  if (send_side_bwe_with_overhead_) {
-    length += transport_overhead_bytes_per_packet_;
-  }
+void RtpTransportControllerSend::OnAddPacket(
+    const RtpPacketSendInfo& packet_info) {
   transport_feedback_adapter_.AddPacket(
-      ssrc, sequence_number, length, pacing_info,
+      packet_info,
+      send_side_bwe_with_overhead_ ? transport_overhead_bytes_per_packet_.load()
+                                   : 0,
       Timestamp::ms(clock_->TimeInMilliseconds()));
 }
 

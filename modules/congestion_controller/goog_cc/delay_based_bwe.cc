@@ -14,9 +14,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <utility>
 
 #include "absl/memory/memory.h"
-#include "api/transport/network_types.h"  // For PacedPacketInfo
 #include "logging/rtc_event_log/events/rtc_event.h"
 #include "logging/rtc_event_log/events/rtc_event_bwe_update_delay_based.h"
 #include "logging/rtc_event_log/rtc_event_log.h"
@@ -40,30 +40,6 @@ constexpr double kTimestampToMs =
 // after the API has been changed.
 constexpr uint32_t kFixedSsrc = 0;
 
-// Parameters for linear least squares fit of regression line to noisy data.
-constexpr size_t kDefaultTrendlineWindowSize = 20;
-constexpr double kDefaultTrendlineSmoothingCoeff = 0.9;
-constexpr double kDefaultTrendlineThresholdGain = 4.0;
-
-const char kBweWindowSizeInPacketsExperiment[] =
-    "WebRTC-BweWindowSizeInPackets";
-
-size_t ReadTrendlineFilterWindowSize(
-    const WebRtcKeyValueConfig* key_value_config) {
-  std::string experiment_string =
-      key_value_config->Lookup(kBweWindowSizeInPacketsExperiment);
-  size_t window_size;
-  int parsed_values =
-      sscanf(experiment_string.c_str(), "Enabled-%zu", &window_size);
-  if (parsed_values == 1) {
-    if (window_size > 1)
-      return window_size;
-    RTC_LOG(WARNING) << "Window size must be greater than 1.";
-  }
-  RTC_LOG(LS_WARNING) << "Failed to parse parameters for BweWindowSizeInPackets"
-                         " experiment from field trial string. Using default.";
-  return kDefaultTrendlineWindowSize;
-}
 }  // namespace
 
 DelayBasedBwe::Result::Result()
@@ -86,30 +62,19 @@ DelayBasedBwe::DelayBasedBwe(const WebRtcKeyValueConfig* key_value_config,
                              RtcEventLog* event_log,
                              NetworkStatePredictor* network_state_predictor)
     : event_log_(event_log),
+      key_value_config_(key_value_config),
+      network_state_predictor_(network_state_predictor),
       inter_arrival_(),
-      delay_detector_(),
+      delay_detector_(
+          new TrendlineEstimator(key_value_config_, network_state_predictor_)),
       last_seen_packet_(Timestamp::MinusInfinity()),
       uma_recorded_(false),
-      trendline_window_size_(
-          key_value_config->Lookup(kBweWindowSizeInPacketsExperiment)
-                      .find("Enabled") == 0
-              ? ReadTrendlineFilterWindowSize(key_value_config)
-              : kDefaultTrendlineWindowSize),
-      trendline_smoothing_coeff_(kDefaultTrendlineSmoothingCoeff),
-      trendline_threshold_gain_(kDefaultTrendlineThresholdGain),
+      rate_control_(key_value_config, /*send_side=*/true),
       prev_bitrate_(DataRate::Zero()),
       prev_state_(BandwidthUsage::kBwNormal),
       alr_limited_backoff_enabled_(
           key_value_config->Lookup("WebRTC-Bwe-AlrLimitedBackoff")
-              .find("Enabled") == 0),
-      network_state_predictor_(network_state_predictor) {
-  RTC_LOG(LS_INFO)
-      << "Using Trendline filter for delay change estimation with window size "
-      << trendline_window_size_;
-  delay_detector_.reset(new TrendlineEstimator(
-      trendline_window_size_, trendline_smoothing_coeff_,
-      trendline_threshold_gain_, network_state_predictor_));
-}
+              .find("Enabled") == 0) {}
 
 DelayBasedBwe::~DelayBasedBwe() {}
 
@@ -117,6 +82,7 @@ DelayBasedBwe::Result DelayBasedBwe::IncomingPacketFeedbackVector(
     const std::vector<PacketFeedback>& packet_feedback_vector,
     absl::optional<DataRate> acked_bitrate,
     absl::optional<DataRate> probe_bitrate,
+    absl::optional<NetworkStateEstimate> network_estimate,
     bool in_alr,
     Timestamp at_time) {
   RTC_DCHECK(std::is_sorted(packet_feedback_vector.begin(),
@@ -158,7 +124,10 @@ DelayBasedBwe::Result DelayBasedBwe::IncomingPacketFeedbackVector(
     // against building very large network queues.
     return Result();
   }
+  rate_control_.SetInApplicationLimitedRegion(in_alr);
+  rate_control_.SetNetworkStateEstimate(network_estimate);
   return MaybeUpdateEstimate(acked_bitrate, probe_bitrate,
+                             std::move(network_estimate),
                              recovered_from_overuse, in_alr, at_time);
 }
 
@@ -171,9 +140,8 @@ void DelayBasedBwe::IncomingPacketFeedback(
     inter_arrival_.reset(
         new InterArrival((kTimestampGroupLengthMs << kInterArrivalShift) / 1000,
                          kTimestampToMs, true));
-    delay_detector_.reset(new TrendlineEstimator(
-        trendline_window_size_, trendline_smoothing_coeff_,
-        trendline_threshold_gain_, network_state_predictor_));
+    delay_detector_.reset(
+        new TrendlineEstimator(key_value_config_, network_state_predictor_));
   }
   last_seen_packet_ = at_time;
 
@@ -199,9 +167,16 @@ void DelayBasedBwe::IncomingPacketFeedback(
                           packet_feedback.arrival_time_ms, calculated_deltas);
 }
 
+DataRate DelayBasedBwe::TriggerOveruse(Timestamp at_time,
+                                       absl::optional<DataRate> link_capacity) {
+  RateControlInput input(BandwidthUsage::kBwOverusing, link_capacity);
+  return rate_control_.Update(&input, at_time);
+}
+
 DelayBasedBwe::Result DelayBasedBwe::MaybeUpdateEstimate(
     absl::optional<DataRate> acked_bitrate,
     absl::optional<DataRate> probe_bitrate,
+    absl::optional<NetworkStateEstimate> state_estimate,
     bool recovered_from_overuse,
     bool in_alr,
     Timestamp at_time) {
@@ -209,11 +184,12 @@ DelayBasedBwe::Result DelayBasedBwe::MaybeUpdateEstimate(
 
   // Currently overusing the bandwidth.
   if (delay_detector_->State() == BandwidthUsage::kBwOverusing) {
-    if (in_alr && alr_limited_backoff_enabled_ &&
-        rate_control_.TimeToReduceFurther(at_time, prev_bitrate_)) {
-      result.updated =
-          UpdateEstimate(at_time, prev_bitrate_, &result.target_bitrate);
-      result.backoff_in_alr = true;
+    if (in_alr && alr_limited_backoff_enabled_) {
+      if (rate_control_.TimeToReduceFurther(at_time, prev_bitrate_)) {
+        result.updated =
+            UpdateEstimate(at_time, prev_bitrate_, &result.target_bitrate);
+        result.backoff_in_alr = true;
+      }
     } else if (acked_bitrate &&
                rate_control_.TimeToReduceFurther(at_time, *acked_bitrate)) {
       result.updated =

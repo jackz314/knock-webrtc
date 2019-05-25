@@ -46,7 +46,6 @@ bool IsEnabled(const WebRtcKeyValueConfig& field_trials,
 }
 
 }  // namespace
-
 const int64_t PacedSender::kMaxQueueLengthMs = 2000;
 const float PacedSender::kDefaultPaceMultiplier = 2.5f;
 
@@ -54,31 +53,23 @@ PacedSender::PacedSender(Clock* clock,
                          PacketSender* packet_sender,
                          RtcEventLog* event_log,
                          const WebRtcKeyValueConfig* field_trials)
-    : PacedSender(clock,
-                  packet_sender,
-                  event_log,
-                  field_trials
-                      ? *field_trials
-                      : static_cast<const webrtc::WebRtcKeyValueConfig&>(
-                            FieldTrialBasedConfig())) {}
-
-PacedSender::PacedSender(Clock* clock,
-                         PacketSender* packet_sender,
-                         RtcEventLog* event_log,
-                         const WebRtcKeyValueConfig& field_trials)
     : clock_(clock),
       packet_sender_(packet_sender),
+      fallback_field_trials_(
+          !field_trials ? absl::make_unique<FieldTrialBasedConfig>() : nullptr),
+      field_trials_(field_trials ? field_trials : fallback_field_trials_.get()),
       alr_detector_(),
-      drain_large_queues_(!IsDisabled(field_trials, "WebRTC-Pacer-DrainQueue")),
+      drain_large_queues_(
+          !IsDisabled(*field_trials_, "WebRTC-Pacer-DrainQueue")),
       send_padding_if_silent_(
-          IsEnabled(field_trials, "WebRTC-Pacer-PadInSilence")),
-      pace_audio_(!IsDisabled(field_trials, "WebRTC-Pacer-BlockAudio")),
+          IsEnabled(*field_trials_, "WebRTC-Pacer-PadInSilence")),
+      pace_audio_(!IsDisabled(*field_trials_, "WebRTC-Pacer-BlockAudio")),
       min_packet_limit_ms_("", kDefaultMinPacketLimitMs),
       last_timestamp_ms_(clock_->TimeInMilliseconds()),
       paused_(false),
       media_budget_(0),
       padding_budget_(0),
-      prober_(field_trials),
+      prober_(*field_trials_),
       probing_send_failure_(false),
       estimated_bitrate_bps_(0),
       min_send_bitrate_kbps_(0u),
@@ -97,7 +88,7 @@ PacedSender::PacedSender(Clock* clock,
                            "pushback experiment must be enabled.";
   }
   ParseFieldTrial({&min_packet_limit_ms_},
-                  field_trials.Lookup("WebRTC-Pacer-MinPacketLimitMs"));
+                  field_trials_->Lookup("WebRTC-Pacer-MinPacketLimitMs"));
   UpdateBudgetWithElapsedTime(min_packet_limit_ms_);
 }
 
@@ -184,7 +175,7 @@ void PacedSender::SetEstimatedBitrate(uint32_t bitrate_bps) {
       std::max(min_send_bitrate_kbps_, estimated_bitrate_bps_ / 1000) *
       pacing_factor_;
   if (!alr_detector_)
-    alr_detector_ = absl::make_unique<AlrDetector>(nullptr /*event_log*/);
+    alr_detector_ = absl::make_unique<AlrDetector>(field_trials_);
   alr_detector_->SetEstimatedBitrate(bitrate_bps);
 }
 
@@ -248,7 +239,7 @@ int64_t PacedSender::ExpectedQueueTimeMs() const {
 absl::optional<int64_t> PacedSender::GetApplicationLimitedRegionStartTime() {
   rtc::CritScope cs(&critsect_);
   if (!alr_detector_)
-    alr_detector_ = absl::make_unique<AlrDetector>(nullptr /*event_log*/);
+    alr_detector_ = absl::make_unique<AlrDetector>(field_trials_);
   return alr_detector_->GetApplicationLimitedRegionStartTime();
 }
 
@@ -380,11 +371,14 @@ void PacedSender::Process() {
       break;
 
     critsect_.Leave();
-    bool success = packet_sender_->TimeToSendPacket(
+    RtpPacketSendResult success = packet_sender_->TimeToSendPacket(
         packet->ssrc, packet->sequence_number, packet->capture_time_ms,
         packet->retransmission, pacing_info);
     critsect_.Enter();
-    if (success) {
+    if (success == RtpPacketSendResult::kSuccess ||
+        success == RtpPacketSendResult::kPacketNotFound) {
+      // Packet sent or invalid packet, remove it from queue.
+      // TODO(webrtc:8052): Don't consume media budget on kInvalid.
       bytes_sent += packet->bytes;
       // Send succeeded, remove it from the queue.
       OnPacketSent(packet);
@@ -452,10 +446,6 @@ void PacedSender::OnPacketSent(const RoundRobinPacketQueue::Packet* packet) {
   bool audio_packet = packet->priority == kHighPriority;
   if (!audio_packet || account_for_audio_) {
     // Update media bytes sent.
-    // TODO(eladalon): TimeToSendPacket() can also return |true| in some
-    // situations where nothing actually ended up being sent to the network,
-    // and we probably don't want to update the budget in such cases.
-    // https://bugs.chromium.org/p/webrtc/issues/detail?id=8052
     UpdateBudgetWithBytesSent(packet->bytes);
     last_send_time_us_ = clock_->TimeInMicroseconds();
   }

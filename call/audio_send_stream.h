@@ -23,6 +23,7 @@
 #include "api/call/transport.h"
 #include "api/crypto/crypto_options.h"
 #include "api/crypto/frame_encryptor_interface.h"
+#include "api/media_transport_config.h"
 #include "api/media_transport_interface.h"
 #include "api/rtp_parameters.h"
 #include "api/scoped_refptr.h"
@@ -42,7 +43,11 @@ class AudioSendStream {
     // TODO(solenberg): Harmonize naming and defaults with receive stream stats.
     uint32_t local_ssrc = 0;
     int64_t bytes_sent = 0;
+    // https://w3c.github.io/webrtc-stats/#dom-rtcoutboundrtpstreamstats-retransmittedbytessent
+    uint64_t retransmitted_bytes_sent = 0;
     int32_t packets_sent = 0;
+    // https://w3c.github.io/webrtc-stats/#dom-rtcoutboundrtpstreamstats-retransmittedpacketssent
+    uint64_t retransmitted_packets_sent = 0;
     int32_t packets_lost = -1;
     float fraction_lost = -1.0f;
     std::string codec_name;
@@ -65,7 +70,8 @@ class AudioSendStream {
 
   struct Config {
     Config() = delete;
-    Config(Transport* send_transport, MediaTransportInterface* media_transport);
+    Config(Transport* send_transport,
+           const MediaTransportConfig& media_transport_config);
     explicit Config(Transport* send_transport);
     ~Config();
     std::string ToString() const;
@@ -104,7 +110,7 @@ class AudioSendStream {
     // the entire life of the AudioSendStream and is owned by the API client.
     Transport* send_transport = nullptr;
 
-    MediaTransportInterface* media_transport = nullptr;
+    MediaTransportConfig media_transport_config;
 
     // Bitrate limits used for variable audio bitrate streams. Set both to -1 to
     // disable audio bitrate adaptation.

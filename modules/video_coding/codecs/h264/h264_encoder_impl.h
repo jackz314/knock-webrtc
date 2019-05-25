@@ -12,6 +12,15 @@
 #ifndef MODULES_VIDEO_CODING_CODECS_H264_H264_ENCODER_IMPL_H_
 #define MODULES_VIDEO_CODING_CODECS_H264_H264_ENCODER_IMPL_H_
 
+// Everything declared in this header is only required when WebRTC is
+// build with H264 support, please do not move anything out of the
+// #ifdef unless needed and tested.
+#ifdef WEBRTC_USE_H264
+
+#if defined(WEBRTC_WIN) && !defined(__clang__)
+#error "See: bugs.webrtc.org/9213#c13."
+#endif
+
 #include <memory>
 #include <vector>
 
@@ -61,8 +70,7 @@ class H264EncoderImpl : public H264Encoder {
 
   int32_t RegisterEncodeCompleteCallback(
       EncodedImageCallback* callback) override;
-  int32_t SetRateAllocation(const VideoBitrateAllocation& bitrate_allocation,
-                            uint32_t framerate) override;
+  void SetRates(const RateControlParameters& parameters) override;
 
   // The result of encoding - an EncodedImage and RTPFragmentationHeader - are
   // passed to the encode complete callback.
@@ -104,5 +112,7 @@ class H264EncoderImpl : public H264Encoder {
 };
 
 }  // namespace webrtc
+
+#endif  // WEBRTC_USE_H264
 
 #endif  // MODULES_VIDEO_CODING_CODECS_H264_H264_ENCODER_IMPL_H_

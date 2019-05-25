@@ -146,16 +146,15 @@ int32_t VideoEncoderWrapper::Encode(
   return HandleReturnCode(jni, ret, "encode");
 }
 
-int32_t VideoEncoderWrapper::SetRateAllocation(
-    const VideoBitrateAllocation& allocation,
-    uint32_t framerate) {
+void VideoEncoderWrapper::SetRates(const RateControlParameters& parameters) {
   JNIEnv* jni = AttachCurrentThreadIfNeeded();
 
   ScopedJavaLocalRef<jobject> j_bitrate_allocation =
-      ToJavaBitrateAllocation(jni, allocation);
+      ToJavaBitrateAllocation(jni, parameters.bitrate);
   ScopedJavaLocalRef<jobject> ret = Java_VideoEncoder_setRateAllocation(
-      jni, encoder_, j_bitrate_allocation, (jint)framerate);
-  return HandleReturnCode(jni, ret, "setRateAllocation");
+      jni, encoder_, j_bitrate_allocation,
+      (jint)(parameters.framerate_fps + 0.5));
+  HandleReturnCode(jni, ret, "setRateAllocation");
 }
 
 VideoEncoder::EncoderInfo VideoEncoderWrapper::GetEncoderInfo() const {
@@ -335,16 +334,12 @@ RTPFragmentationHeader VideoEncoderWrapper::ParseFragmentationHeader(
     for (size_t i = 0; i < nalu_idxs.size(); i++) {
       header.fragmentationOffset[i] = nalu_idxs[i].payload_start_offset;
       header.fragmentationLength[i] = nalu_idxs[i].payload_size;
-      header.fragmentationPlType[i] = 0;
-      header.fragmentationTimeDiff[i] = 0;
     }
   } else {
     // Generate a header describing a single fragment.
     header.VerifyAndAllocateFragmentationHeader(1);
     header.fragmentationOffset[0] = 0;
     header.fragmentationLength[0] = buffer.size();
-    header.fragmentationPlType[0] = 0;
-    header.fragmentationTimeDiff[0] = 0;
   }
   return header;
 }

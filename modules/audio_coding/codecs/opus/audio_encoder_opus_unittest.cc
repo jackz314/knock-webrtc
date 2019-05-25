@@ -56,7 +56,7 @@ std::unique_ptr<AudioEncoderOpusStates> CreateCodec(size_t num_channels) {
       absl::make_unique<AudioEncoderOpusStates>();
   states->mock_audio_network_adaptor = nullptr;
   states->fake_clock.reset(new rtc::ScopedFakeClock());
-  states->fake_clock->SetTimeMicros(kInitialTimeUs);
+  states->fake_clock->SetTime(Timestamp::us(kInitialTimeUs));
 
   MockAudioNetworkAdaptor** mock_ptr = &states->mock_audio_network_adaptor;
   AudioEncoderOpusImpl::AudioNetworkAdaptorCreator creator =
@@ -577,7 +577,8 @@ TEST(AudioEncoderOpusTest, ConfigBandwidthAdaptation) {
                    config.application ==
                            AudioEncoderOpusConfig::ApplicationMode::kVoip
                        ? 0
-                       : 1));
+                       : 1,
+                   48000));
 
   // Bitrate below minmum wideband. Expect narrowband.
   config.bitrate_bps = absl::optional<int>(7999);

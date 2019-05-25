@@ -373,8 +373,10 @@ void AudioProcessingSimulator::CreateAudioProcessor() {
   }
   if (settings_.use_agc2) {
     apm_config.gain_controller2.enabled = *settings_.use_agc2;
-    apm_config.gain_controller2.fixed_digital.gain_db =
-        settings_.agc2_fixed_gain_db;
+    if (settings_.agc2_fixed_gain_db) {
+      apm_config.gain_controller2.fixed_digital.gain_db =
+          *settings_.agc2_fixed_gain_db;
+    }
     if (settings_.agc2_use_adaptive_gain) {
       apm_config.gain_controller2.adaptive_digital.enabled =
           *settings_.agc2_use_adaptive_gain;
@@ -384,8 +386,10 @@ void AudioProcessingSimulator::CreateAudioProcessor() {
   }
   if (settings_.use_pre_amplifier) {
     apm_config.pre_amplifier.enabled = *settings_.use_pre_amplifier;
-    apm_config.pre_amplifier.fixed_gain_factor =
-        settings_.pre_amplifier_gain_factor;
+    if (settings_.pre_amplifier_gain_factor) {
+      apm_config.pre_amplifier.fixed_gain_factor =
+          *settings_.pre_amplifier_gain_factor;
+    }
   }
 
   const bool use_legacy_aec = settings_.use_aec && *settings_.use_aec &&

@@ -8,6 +8,8 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include "modules/audio_processing/test/audioproc_float_impl.h"
+
 #include <string.h>
 
 #include <iostream>
@@ -20,7 +22,6 @@
 #include "modules/audio_processing/include/audio_processing.h"
 #include "modules/audio_processing/test/aec_dump_based_simulator.h"
 #include "modules/audio_processing/test/audio_processing_simulator.h"
-#include "modules/audio_processing/test/audioproc_float_impl.h"
 #include "modules/audio_processing/test/wav_based_simulator.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/flags.h"
@@ -149,10 +150,12 @@ WEBRTC_DEFINE_int(agc_limiter,
 WEBRTC_DEFINE_int(agc_compression_gain,
                   kParameterNotSpecifiedValue,
                   "Specify the AGC compression gain (0-90)");
-WEBRTC_DEFINE_float(agc2_enable_adaptive_gain,
+WEBRTC_DEFINE_int(agc2_enable_adaptive_gain,
+                  kParameterNotSpecifiedValue,
+                  "Activate (1) or deactivate(0) the AGC2 adaptive gain");
+WEBRTC_DEFINE_float(agc2_fixed_gain_db,
                     kParameterNotSpecifiedValue,
-                    "Activate (1) or deactivate(0) the AGC2 adaptive gain");
-WEBRTC_DEFINE_float(agc2_fixed_gain_db, 0.f, "AGC2 fixed gain (dB) to apply");
+                    "AGC2 fixed gain (dB) to apply");
 
 std::vector<std::string> GetAgc2AdaptiveLevelEstimatorNames() {
   return {"RMS", "peak"};
@@ -163,7 +166,7 @@ WEBRTC_DEFINE_string(
     "AGC2 adaptive digital level estimator to use [RMS, peak]");
 
 WEBRTC_DEFINE_float(pre_amplifier_gain_factor,
-                    1.f,
+                    kParameterNotSpecifiedValue,
                     "Pre-amplifier gain factor (linear) to apply");
 WEBRTC_DEFINE_int(vad_likelihood,
                   kParameterNotSpecifiedValue,
@@ -237,6 +240,14 @@ void SetSettingIfSpecified(const std::string& value,
 
 void SetSettingIfSpecified(int value, absl::optional<int>* parameter) {
   if (value != kParameterNotSpecifiedValue) {
+    *parameter = value;
+  }
+}
+
+void SetSettingIfSpecified(float value, absl::optional<float>* parameter) {
+  constexpr float kFloatParameterNotSpecifiedValue =
+      kParameterNotSpecifiedValue;
+  if (value != kFloatParameterNotSpecifiedValue) {
     *parameter = value;
   }
 }
@@ -336,10 +347,11 @@ SimulationSettings CreateSettings() {
                         &settings.agc_compression_gain);
   SetSettingIfFlagSet(FLAG_agc2_enable_adaptive_gain,
                       &settings.agc2_use_adaptive_gain);
-  settings.agc2_fixed_gain_db = FLAG_agc2_fixed_gain_db;
+  SetSettingIfSpecified(FLAG_agc2_fixed_gain_db, &settings.agc2_fixed_gain_db);
   settings.agc2_adaptive_level_estimator =
       MapAgc2AdaptiveLevelEstimator(FLAG_agc2_adaptive_level_estimator);
-  settings.pre_amplifier_gain_factor = FLAG_pre_amplifier_gain_factor;
+  SetSettingIfSpecified(FLAG_pre_amplifier_gain_factor,
+                        &settings.pre_amplifier_gain_factor);
   SetSettingIfSpecified(FLAG_vad_likelihood, &settings.vad_likelihood);
   SetSettingIfSpecified(FLAG_ns_level, &settings.ns_level);
   SetSettingIfSpecified(FLAG_stream_delay, &settings.stream_delay);
@@ -445,9 +457,8 @@ void PerformBasicParameterSanityChecks(const SimulationSettings& settings) {
       "Error: --agc_compression_gain must be specified between 0 and 90.\n");
 
   ReportConditionalErrorAndExit(
-      settings.use_agc2 && *settings.use_agc2 &&
-          ((settings.agc2_fixed_gain_db) < 0 ||
-           (settings.agc2_fixed_gain_db) > 90),
+      settings.agc2_fixed_gain_db && ((*settings.agc2_fixed_gain_db) < 0 ||
+                                      (*settings.agc2_fixed_gain_db) > 90),
       "Error: --agc2_fixed_gain_db must be specified between 0 and 90.\n");
 
   ReportConditionalErrorAndExit(
@@ -531,6 +542,12 @@ void PerformBasicParameterSanityChecks(const SimulationSettings& settings) {
       !settings.aec_dump_input_filename &&
           settings.call_order_output_filename.has_value(),
       "Error: --output_custom_call_order_file needs an AEC dump input file.\n");
+
+  ReportConditionalErrorAndExit(
+      (!settings.use_pre_amplifier || !(*settings.use_pre_amplifier)) &&
+          settings.pre_amplifier_gain_factor.has_value(),
+      "Error: --pre_amplifier_gain_factor needs --pre_amplifier to be "
+      "specified and set.\n");
 }
 
 }  // namespace

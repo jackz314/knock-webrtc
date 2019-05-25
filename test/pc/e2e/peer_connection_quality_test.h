@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "absl/memory/memory.h"
+#include "api/task_queue/task_queue_factory.h"
 #include "api/test/audio_quality_analyzer_interface.h"
 #include "api/test/peerconnection_quality_test_fixture.h"
 #include "api/units/time_delta.h"
@@ -123,6 +124,10 @@ class PeerConfigurerImpl final
     params_->rtc_event_log_path = std::move(path);
     return this;
   }
+  PeerConfigurer* SetAecDumpPath(std::string path) override {
+    params_->aec_dump_path = std::move(path);
+    return this;
+  }
   PeerConfigurer* SetRTCConfiguration(
       PeerConnectionInterface::RTCConfiguration configuration) override {
     params_->rtc_configuration = std::move(configuration);
@@ -150,6 +155,8 @@ class PeerConnectionE2EQualityTest
   using RunParams = PeerConnectionE2EQualityTestFixture::RunParams;
   using VideoConfig = PeerConnectionE2EQualityTestFixture::VideoConfig;
   using PeerConfigurer = PeerConnectionE2EQualityTestFixture::PeerConfigurer;
+  using QualityMetricsReporter =
+      PeerConnectionE2EQualityTestFixture::QualityMetricsReporter;
 
   PeerConnectionE2EQualityTest(
       std::string test_case_name,
@@ -164,10 +171,19 @@ class PeerConnectionE2EQualityTest
                     TimeDelta interval,
                     std::function<void(TimeDelta)> func) override;
 
+  void AddQualityMetricsReporter(std::unique_ptr<QualityMetricsReporter>
+                                     quality_metrics_reporter) override;
+
   void AddPeer(rtc::Thread* network_thread,
                rtc::NetworkManager* network_manager,
                rtc::FunctionView<void(PeerConfigurer*)> configurer) override;
   void Run(RunParams run_params) override;
+
+  TimeDelta GetRealTestDuration() const override {
+    rtc::CritScope crit(&lock_);
+    RTC_CHECK_NE(real_test_duration_, TimeDelta::Zero());
+    return real_test_duration_;
+  }
 
  private:
   struct ScheduledActivity {
@@ -195,7 +211,7 @@ class PeerConnectionE2EQualityTest
   void OnTrackCallback(rtc::scoped_refptr<RtpTransceiverInterface> transceiver,
                        std::vector<VideoConfig> remote_video_configs);
   // Have to be run on the signaling thread.
-  void SetupCallOnSignalingThread();
+  void SetupCallOnSignalingThread(const RunParams& run_params);
   void TearDownCallOnSignalingThread();
   std::vector<rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>
   MaybeAddMedia(TestPeer* peer);
@@ -203,7 +219,10 @@ class PeerConnectionE2EQualityTest
   MaybeAddVideo(TestPeer* peer);
   std::unique_ptr<test::FrameGenerator> CreateFrameGenerator(
       const VideoConfig& video_config);
+  std::unique_ptr<test::FrameGenerator> CreateScreenShareFrameGenerator(
+      const VideoConfig& video_config);
   void MaybeAddAudio(TestPeer* peer);
+  void SetPeerCodecPreferences(TestPeer* peer, const RunParams& run_params);
   void SetupCall();
   void StartVideo(
       const std::vector<
@@ -215,6 +234,7 @@ class PeerConnectionE2EQualityTest
   Timestamp Now() const;
 
   Clock* const clock_;
+  const std::unique_ptr<TaskQueueFactory> task_queue_factory_;
   std::string test_case_name_;
   std::unique_ptr<VideoQualityAnalyzerInjectionHelper>
       video_quality_analyzer_injection_helper_;
@@ -226,6 +246,8 @@ class PeerConnectionE2EQualityTest
 
   std::unique_ptr<TestPeer> alice_;
   std::unique_ptr<TestPeer> bob_;
+  std::vector<std::unique_ptr<QualityMetricsReporter>>
+      quality_metrics_reporters_;
 
   std::vector<rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>
       alice_video_sources_;
@@ -240,6 +262,7 @@ class PeerConnectionE2EQualityTest
   // Time when test call was started. Minus infinity means that call wasn't
   // started yet.
   Timestamp start_time_ RTC_GUARDED_BY(lock_) = Timestamp::MinusInfinity();
+  TimeDelta real_test_duration_ RTC_GUARDED_BY(lock_) = TimeDelta::Zero();
   // Queue of activities that were added before test call was started.
   // Activities from this queue will be posted on the |task_queue_| after test
   // call will be set up and then this queue will be unused.

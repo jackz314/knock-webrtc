@@ -66,7 +66,6 @@ DecisionLogic::DecisionLogic(int fs_hz,
       timescale_countdown_(
           tick_timer_->GetNewCountdown(kMinTimescaleInterval + 1)),
       num_consecutive_expands_(0) {
-  delay_manager_->set_streaming_mode(false);
   SetSampleRate(fs_hz, output_size_samples);
 }
 
@@ -126,7 +125,13 @@ Operations DecisionLogic::GetDecision(const SyncBuffer& sync_buffer,
                            prev_mode == kModePreemptiveExpandSuccess ||
                            prev_mode == kModePreemptiveExpandLowEnergy);
 
-  FilterBufferLevel(cur_size_samples, prev_mode);
+  // Do not update buffer history if currently playing CNG since it will bias
+  // the filtered buffer level.
+  if ((prev_mode != kModeRfc3389Cng) && (prev_mode != kModeCodecInternalCng) &&
+      !(next_packet && next_packet->frame &&
+        next_packet->frame->IsDtxPacket())) {
+    FilterBufferLevel(cur_size_samples);
+  }
 
   // Guard for errors, to avoid getting stuck in error mode.
   if (prev_mode == kModeError) {
@@ -206,29 +211,24 @@ void DecisionLogic::ExpandDecision(Operations operation) {
   }
 }
 
-void DecisionLogic::FilterBufferLevel(size_t buffer_size_samples,
-                                      Modes prev_mode) {
-  // Do not update buffer history if currently playing CNG since it will bias
-  // the filtered buffer level.
-  if ((prev_mode != kModeRfc3389Cng) && (prev_mode != kModeCodecInternalCng)) {
-    buffer_level_filter_->SetTargetBufferLevel(
-        delay_manager_->base_target_level());
+void DecisionLogic::FilterBufferLevel(size_t buffer_size_samples) {
+  buffer_level_filter_->SetTargetBufferLevel(
+      delay_manager_->base_target_level());
 
-    size_t buffer_size_packets = 0;
-    if (packet_length_samples_ > 0) {
-      // Calculate size in packets.
-      buffer_size_packets = buffer_size_samples / packet_length_samples_;
-    }
-    int sample_memory_local = 0;
-    if (prev_time_scale_) {
-      sample_memory_local = sample_memory_;
-      timescale_countdown_ =
-          tick_timer_->GetNewCountdown(kMinTimescaleInterval);
-    }
-    buffer_level_filter_->Update(buffer_size_packets, sample_memory_local,
-                                 packet_length_samples_);
-    prev_time_scale_ = false;
+  size_t buffer_size_packets = 0;
+  if (packet_length_samples_ > 0) {
+    // Calculate size in packets.
+    buffer_size_packets = buffer_size_samples / packet_length_samples_;
   }
+  int sample_memory_local = 0;
+  if (prev_time_scale_) {
+    sample_memory_local = sample_memory_;
+    timescale_countdown_ = tick_timer_->GetNewCountdown(kMinTimescaleInterval);
+  }
+
+  buffer_level_filter_->Update(buffer_size_packets, sample_memory_local,
+                               packet_length_samples_);
+  prev_time_scale_ = false;
 }
 
 Operations DecisionLogic::CngOperation(Modes prev_mode,

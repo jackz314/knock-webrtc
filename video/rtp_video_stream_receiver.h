@@ -32,7 +32,6 @@
 #include "modules/rtp_rtcp/include/rtp_rtcp_defines.h"
 #include "modules/rtp_rtcp/source/contributing_sources.h"
 #include "modules/video_coding/h264_sps_pps_tracker.h"
-#include "modules/video_coding/include/video_coding_defines.h"
 #include "modules/video_coding/loss_notification_controller.h"
 #include "modules/video_coding/packet_buffer.h"
 #include "modules/video_coding/rtp_frame_reference_finder.h"
@@ -59,7 +58,7 @@ class UlpfecReceiver;
 class RtpVideoStreamReceiver : public LossNotificationSender,
                                public RecoveredPacketReceiver,
                                public RtpPacketSinkInterface,
-                               public VCMPacketRequestCallback,
+                               public KeyFrameRequestSender,
                                public video_coding::OnAssembledFrameCallback,
                                public video_coding::OnCompleteFrameCallback,
                                public OnDecryptedFrameCallback,
@@ -69,19 +68,39 @@ class RtpVideoStreamReceiver : public LossNotificationSender,
       Clock* clock,
       Transport* transport,
       RtcpRttStats* rtt_stats,
+      // The packet router is optional; if provided, the RtpRtcp module for this
+      // stream is registered as a candidate for sending REMB and transport
+      // feedback.
       PacketRouter* packet_router,
       const VideoReceiveStream::Config* config,
       ReceiveStatistics* rtp_receive_statistics,
       ReceiveStatisticsProxy* receive_stats_proxy,
       ProcessThread* process_thread,
       NackSender* nack_sender,
-      KeyFrameRequestSender* keyframe_request_sender,
       video_coding::OnCompleteFrameCallback* complete_frame_callback,
       rtc::scoped_refptr<FrameDecryptorInterface> frame_decryptor);
+
+  // Constructor with injected RtpRtcp. Intended for tests only!
+  RtpVideoStreamReceiver(
+      Clock* clock,
+      std::unique_ptr<RtpRtcp> rtp_rtcp,
+      // The packet router is optional; if provided, the RtpRtcp module for this
+      // stream is registered as a candidate for sending REMB and transport
+      // feedback.
+      PacketRouter* packet_router,
+      const VideoReceiveStream::Config* config,
+      ReceiveStatistics* rtp_receive_statistics,
+      ReceiveStatisticsProxy* receive_stats_proxy,
+      ProcessThread* process_thread,
+      NackSender* nack_sender,
+      video_coding::OnCompleteFrameCallback* complete_frame_callback,
+      rtc::scoped_refptr<FrameDecryptorInterface> frame_decryptor);
+
   ~RtpVideoStreamReceiver() override;
 
   void AddReceiveCodec(const VideoCodec& video_codec,
-                       const std::map<std::string, std::string>& codec_params);
+                       const std::map<std::string, std::string>& codec_params,
+                       bool raw_payload);
 
   void StartReceive();
   void StopReceive();
@@ -110,7 +129,6 @@ class RtpVideoStreamReceiver : public LossNotificationSender,
       size_t payload_size,
       const RTPHeader& rtp_header,
       const RTPVideoHeader& video_header,
-      VideoFrameType frame_type,
       const absl::optional<RtpGenericFrameDescriptor>& generic_descriptor,
       bool is_recovered);
 
@@ -118,7 +136,7 @@ class RtpVideoStreamReceiver : public LossNotificationSender,
   void OnRecoveredPacket(const uint8_t* packet, size_t packet_length) override;
 
   // Send an RTCP keyframe request.
-  void RequestKeyFrame();
+  void RequestKeyFrame() override;
 
   // Implements LossNotificationSender.
   void SendLossNotification(uint16_t last_decoded_seq_num,
@@ -135,10 +153,6 @@ class RtpVideoStreamReceiver : public LossNotificationSender,
 
   // Don't use, still experimental.
   void RequestPacketRetransmit(const std::vector<uint16_t>& sequence_numbers);
-
-  // Implements VCMPacketRequestCallback.
-  int32_t ResendPackets(const uint16_t* sequenceNumbers,
-                        uint16_t length) override;
 
   // Implements OnAssembledFrameCallback.
   void OnAssembledFrame(
@@ -208,7 +222,6 @@ class RtpVideoStreamReceiver : public LossNotificationSender,
 
   // Members for the new jitter buffer experiment.
   video_coding::OnCompleteFrameCallback* complete_frame_callback_;
-  KeyFrameRequestSender* const keyframe_request_sender_;
   std::unique_ptr<NackModule> nack_module_;
   std::unique_ptr<LossNotificationController> loss_notification_controller_;
   rtc::scoped_refptr<video_coding::PacketBuffer> packet_buffer_;
@@ -218,7 +231,9 @@ class RtpVideoStreamReceiver : public LossNotificationSender,
       RTC_GUARDED_BY(last_seq_num_cs_);
   video_coding::H264SpsPpsTracker tracker_;
 
-  std::map<uint8_t, VideoCodecType> pt_codec_type_;
+  // Maps payload type to codec type, for packetization.
+  std::map<uint8_t, absl::optional<VideoCodecType>> payload_type_map_;
+
   // TODO(johan): Remove pt_codec_params_ once
   // https://bugs.chromium.org/p/webrtc/issues/detail?id=6883 is resolved.
   // Maps a payload type to a map of out-of-band supplied codec parameters.

@@ -61,6 +61,7 @@
 #include "pc/test/fake_video_track_renderer.h"
 #include "pc/test/mock_peer_connection_observers.h"
 #include "rtc_base/fake_clock.h"
+#include "rtc_base/fake_mdns_responder.h"
 #include "rtc_base/fake_network.h"
 #include "rtc_base/firewall_socket_server.h"
 #include "rtc_base/gunit.h"
@@ -69,6 +70,7 @@
 #include "rtc_base/time_utils.h"
 #include "rtc_base/virtual_socket_server.h"
 #include "system_wrappers/include/metrics.h"
+#include "test/field_trial.h"
 #include "test/gmock.h"
 
 namespace webrtc {
@@ -551,13 +553,26 @@ class PeerConnectionWrapper : public webrtc::PeerConnectionObserver,
     }
   }
 
-  rtc::FakeNetworkManager* network() const {
+  rtc::FakeNetworkManager* network_manager() const {
     return fake_network_manager_.get();
   }
   cricket::PortAllocator* port_allocator() const { return port_allocator_; }
 
   webrtc::FakeRtcEventLogFactory* event_log_factory() const {
     return event_log_factory_;
+  }
+
+  const cricket::Candidate& last_candidate_gathered() const {
+    return last_candidate_gathered_;
+  }
+
+  // Sets the mDNS responder for the owned fake network manager and keeps a
+  // reference to the responder.
+  void SetMdnsResponder(
+      std::unique_ptr<webrtc::FakeMdnsResponder> mdns_responder) {
+    RTC_DCHECK(mdns_responder != nullptr);
+    mdns_responder_ = mdns_responder.get();
+    network_manager()->set_mdns_responder(std::move(mdns_responder));
   }
 
  private:
@@ -921,11 +936,10 @@ class PeerConnectionWrapper : public webrtc::PeerConnectionObserver,
 
     if (remote_async_resolver_) {
       const auto& local_candidate = candidate->candidate();
-      const auto& mdns_responder = network()->GetMdnsResponderForTesting();
       if (local_candidate.address().IsUnresolvedIP()) {
         RTC_DCHECK(local_candidate.type() == cricket::LOCAL_PORT_TYPE);
         rtc::SocketAddress resolved_addr(local_candidate.address());
-        const auto resolved_ip = mdns_responder->GetMappedAddressForName(
+        const auto resolved_ip = mdns_responder_->GetMappedAddressForName(
             local_candidate.address().hostname());
         RTC_DCHECK(!resolved_ip.IsNil());
         resolved_addr.SetResolvedIP(resolved_ip);
@@ -942,6 +956,7 @@ class PeerConnectionWrapper : public webrtc::PeerConnectionObserver,
       return;
     }
     SendIceMessage(candidate->sdp_mid(), candidate->sdp_mline_index(), ice_sdp);
+    last_candidate_gathered_ = candidate->candidate();
   }
   void OnDataChannel(
       rtc::scoped_refptr<DataChannelInterface> data_channel) override {
@@ -953,6 +968,8 @@ class PeerConnectionWrapper : public webrtc::PeerConnectionObserver,
   std::string debug_name_;
 
   std::unique_ptr<rtc::FakeNetworkManager> fake_network_manager_;
+  // Reference to the mDNS responder owned by |fake_network_manager_| after set.
+  webrtc::FakeMdnsResponder* mdns_responder_ = nullptr;
 
   rtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection_;
   rtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
@@ -972,6 +989,7 @@ class PeerConnectionWrapper : public webrtc::PeerConnectionObserver,
   SignalingMessageReceiver* signaling_message_receiver_ = nullptr;
   int signaling_delay_ms_ = 0;
   bool signal_ice_candidates_ = true;
+  cricket::Candidate last_candidate_gathered_;
 
   // Store references to the video sources we've created, so that we can stop
   // them, if required.
@@ -3443,8 +3461,8 @@ TEST_P(PeerConnectionIntegrationTest, SctpDataChannelToAudioVideoUpgrade) {
 }
 
 static void MakeSpecCompliantSctpOffer(cricket::SessionDescription* desc) {
-  cricket::DataContentDescription* dcd_offer =
-      GetFirstDataContentDescription(desc);
+  cricket::SctpDataContentDescription* dcd_offer =
+      GetFirstSctpDataContentDescription(desc);
   ASSERT_TRUE(dcd_offer);
   dcd_offer->set_use_sctpmap(false);
   dcd_offer->set_protocol("UDP/DTLS/SCTP");
@@ -3818,8 +3836,10 @@ TEST_P(PeerConnectionIntegrationTest,
   callee()->SetRemoteAsyncResolver(&caller_async_resolver);
 
   // Enable hostname candidates with mDNS names.
-  caller()->network()->CreateMdnsResponder(network_thread());
-  callee()->network()->CreateMdnsResponder(network_thread());
+  caller()->SetMdnsResponder(
+      absl::make_unique<webrtc::FakeMdnsResponder>(network_thread()));
+  callee()->SetMdnsResponder(
+      absl::make_unique<webrtc::FakeMdnsResponder>(network_thread()));
 
   SetPortAllocatorFlags(kOnlyLocalPorts, kOnlyLocalPorts);
 
@@ -3884,15 +3904,15 @@ class PeerConnectionIntegrationIceStatesTest
 
   void SetUpNetworkInterfaces() {
     // Remove the default interfaces added by the test infrastructure.
-    caller()->network()->RemoveInterface(kDefaultLocalAddress);
-    callee()->network()->RemoveInterface(kDefaultLocalAddress);
+    caller()->network_manager()->RemoveInterface(kDefaultLocalAddress);
+    callee()->network_manager()->RemoveInterface(kDefaultLocalAddress);
 
     // Add network addresses for test.
     for (const auto& caller_address : CallerAddresses()) {
-      caller()->network()->AddInterface(caller_address);
+      caller()->network_manager()->AddInterface(caller_address);
     }
     for (const auto& callee_address : CalleeAddresses()) {
-      callee()->network()->AddInterface(callee_address);
+      callee()->network_manager()->AddInterface(callee_address);
     }
   }
 
@@ -5063,6 +5083,72 @@ TEST_P(PeerConnectionIntegrationTest,
   EXPECT_LT(0, callee_ice_event_count);
 }
 
+TEST_P(PeerConnectionIntegrationTest, RegatherAfterChangingIceTransportType) {
+  webrtc::test::ScopedFieldTrials field_trials(
+      "WebRTC-GatherOnCandidateFilterChanged/Enabled/");
+  static const rtc::SocketAddress turn_server_internal_address{"88.88.88.0",
+                                                               3478};
+  static const rtc::SocketAddress turn_server_external_address{"88.88.88.1", 0};
+
+  CreateTurnServer(turn_server_internal_address, turn_server_external_address);
+
+  webrtc::PeerConnectionInterface::IceServer ice_server;
+  ice_server.urls.push_back("turn:88.88.88.0:3478");
+  ice_server.username = "test";
+  ice_server.password = "test";
+
+  PeerConnectionInterface::RTCConfiguration caller_config;
+  caller_config.servers.push_back(ice_server);
+  caller_config.type = webrtc::PeerConnectionInterface::kRelay;
+  caller_config.continual_gathering_policy = PeerConnection::GATHER_CONTINUALLY;
+
+  PeerConnectionInterface::RTCConfiguration callee_config;
+  callee_config.servers.push_back(ice_server);
+  callee_config.type = webrtc::PeerConnectionInterface::kRelay;
+  callee_config.continual_gathering_policy = PeerConnection::GATHER_CONTINUALLY;
+
+  ASSERT_TRUE(
+      CreatePeerConnectionWrappersWithConfig(caller_config, callee_config));
+
+  // Do normal offer/answer and wait for ICE to complete.
+  ConnectFakeSignaling();
+  caller()->AddAudioVideoTracks();
+  callee()->AddAudioVideoTracks();
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE_WAIT(SignalingStateStable(), kDefaultTimeout);
+  // Since we are doing continual gathering, the ICE transport does not reach
+  // kIceGatheringComplete (see
+  // P2PTransportChannel::OnCandidatesAllocationDone), and consequently not
+  // kIceConnectionComplete.
+  EXPECT_EQ_WAIT(webrtc::PeerConnectionInterface::kIceConnectionConnected,
+                 caller()->ice_connection_state(), kDefaultTimeout);
+  EXPECT_EQ_WAIT(webrtc::PeerConnectionInterface::kIceConnectionConnected,
+                 callee()->ice_connection_state(), kDefaultTimeout);
+  // Note that we cannot use the metric
+  // |WebRTC.PeerConnection.CandidatePairType_UDP| in this test since this
+  // metric is only populated when we reach kIceConnectionComplete in the
+  // current implementation.
+  EXPECT_EQ(cricket::RELAY_PORT_TYPE,
+            caller()->last_candidate_gathered().type());
+  EXPECT_EQ(cricket::RELAY_PORT_TYPE,
+            callee()->last_candidate_gathered().type());
+
+  // Loosen the caller's candidate filter.
+  caller_config = caller()->pc()->GetConfiguration();
+  caller_config.type = webrtc::PeerConnectionInterface::kAll;
+  caller()->pc()->SetConfiguration(caller_config);
+  // We should have gathered a new host candidate.
+  EXPECT_EQ_WAIT(cricket::LOCAL_PORT_TYPE,
+                 caller()->last_candidate_gathered().type(), kDefaultTimeout);
+
+  // Loosen the callee's candidate filter.
+  callee_config = callee()->pc()->GetConfiguration();
+  callee_config.type = webrtc::PeerConnectionInterface::kAll;
+  callee()->pc()->SetConfiguration(callee_config);
+  EXPECT_EQ_WAIT(cricket::LOCAL_PORT_TYPE,
+                 callee()->last_candidate_gathered().type(), kDefaultTimeout);
+}
+
 INSTANTIATE_TEST_SUITE_P(PeerConnectionIntegrationTest,
                          PeerConnectionIntegrationTest,
                          Values(SdpSemantics::kPlanB,
@@ -5249,6 +5335,28 @@ TEST_F(PeerConnectionIntegrationTestUnifiedPlan,
     ASSERT_TRUE(ExpectNewFrames(media_expectations));
   }
 }
+
+#ifdef HAVE_SCTP
+
+TEST_F(PeerConnectionIntegrationTestUnifiedPlan,
+       EndToEndCallWithBundledSctpDataChannel) {
+  ASSERT_TRUE(CreatePeerConnectionWrappers());
+  ConnectFakeSignaling();
+  caller()->CreateDataChannel();
+  caller()->AddAudioVideoTracks();
+  callee()->AddAudioVideoTracks();
+  caller()->SetGeneratedSdpMunger(MakeSpecCompliantSctpOffer);
+  caller()->CreateAndSetAndSignalOffer();
+  ASSERT_TRUE_WAIT(SignalingStateStable(), kDefaultTimeout);
+  // Ensure that media and data are multiplexed on the same DTLS transport.
+  // This only works on Unified Plan, because transports are not exposed in plan
+  // B.
+  auto sctp_info = caller()->pc()->GetSctpTransport()->Information();
+  EXPECT_EQ(sctp_info.dtls_transport(),
+            caller()->pc()->GetSenders()[0]->dtls_transport());
+}
+
+#endif  // HAVE_SCTP
 
 }  // namespace
 }  // namespace webrtc

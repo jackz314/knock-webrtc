@@ -21,12 +21,15 @@
 #include "api/video/encoded_frame.h"
 #include "modules/video_coding/include/video_coding_defines.h"
 #include "modules/video_coding/inter_frame_delay.h"
+#include "modules/video_coding/jitter_estimator.h"
 #include "modules/video_coding/utility/decoded_frames_history.h"
 #include "rtc_base/constructor_magic.h"
 #include "rtc_base/critical_section.h"
 #include "rtc_base/event.h"
 #include "rtc_base/experiments/rtt_mult_experiment.h"
 #include "rtc_base/numerics/sequence_number_util.h"
+#include "rtc_base/task_queue.h"
+#include "rtc_base/task_utils/repeating_task.h"
 #include "rtc_base/thread_annotations.h"
 
 namespace webrtc {
@@ -43,7 +46,6 @@ class FrameBuffer {
   enum ReturnReason { kFrameFound, kTimeout, kStopped };
 
   FrameBuffer(Clock* clock,
-              VCMJitterEstimator* jitter_estimator,
               VCMTiming* timing,
               VCMReceiveStatisticsCallback* stats_callback);
 
@@ -63,7 +65,12 @@ class FrameBuffer {
   //  - If the FrameBuffer is stopped then it will return kStopped.
   ReturnReason NextFrame(int64_t max_wait_time_ms,
                          std::unique_ptr<EncodedFrame>* frame_out,
-                         bool keyframe_required = false);
+                         bool keyframe_required);
+  void NextFrame(
+      int64_t max_wait_time_ms,
+      bool keyframe_required,
+      rtc::TaskQueue* callback_queue,
+      std::function<void(std::unique_ptr<EncodedFrame>, ReturnReason)> handler);
 
   // Tells the FrameBuffer which protection mode that is in use. Affects
   // the frame timing.
@@ -121,6 +128,9 @@ class FrameBuffer {
   int64_t FindNextFrame(int64_t now_ms) RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
   EncodedFrame* GetNextFrame() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
 
+  void StartWaitForNextFrameOnQueue() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
+  void CancelCallback() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
+
   // Update all directly dependent and indirectly dependent frames and mark
   // them as continuous if all their references has been fulfilled.
   void PropagateContinuity(FrameMap::iterator start)
@@ -163,11 +173,16 @@ class FrameBuffer {
 
   rtc::CriticalSection crit_;
   Clock* const clock_;
+
+  rtc::TaskQueue* callback_queue_ RTC_GUARDED_BY(crit_);
+  RepeatingTaskHandle callback_task_ RTC_GUARDED_BY(crit_);
+  std::function<void(std::unique_ptr<EncodedFrame>, ReturnReason)>
+      frame_handler_ RTC_GUARDED_BY(crit_);
   int64_t latest_return_time_ms_ RTC_GUARDED_BY(crit_);
   bool keyframe_required_ RTC_GUARDED_BY(crit_);
 
   rtc::Event new_continuous_frame_event_;
-  VCMJitterEstimator* const jitter_estimator_ RTC_GUARDED_BY(crit_);
+  VCMJitterEstimator jitter_estimator_ RTC_GUARDED_BY(crit_);
   VCMTiming* const timing_ RTC_GUARDED_BY(crit_);
   VCMInterFrameDelay inter_frame_delay_ RTC_GUARDED_BY(crit_);
   absl::optional<VideoLayerFrameId> last_continuous_frame_

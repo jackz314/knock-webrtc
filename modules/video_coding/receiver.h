@@ -43,20 +43,15 @@ class VCMReceiver {
   ~VCMReceiver();
 
   void Reset();
-  void UpdateRtt(int64_t rtt);
   int32_t InsertPacket(const VCMPacket& packet);
   VCMEncodedFrame* FrameForDecoding(uint16_t max_wait_time_ms,
                                     bool prefer_late_decoding);
   void ReleaseFrame(VCMEncodedFrame* frame);
 
   // NACK.
-  void SetNackMode(VCMNackMode nackMode,
-                   int64_t low_rtt_nack_threshold_ms,
-                   int64_t high_rtt_nack_threshold_ms);
   void SetNackSettings(size_t max_nack_list_size,
                        int max_packet_age_to_nack,
                        int max_incomplete_time_ms);
-  VCMNackMode NackMode() const;
   std::vector<uint16_t> NackList(bool* request_key_frame);
 
   void TriggerDecoderShutdown();

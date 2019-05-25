@@ -44,11 +44,12 @@ class PacedSender : public Pacer {
     // module again.
     // Called when it's time to send a queued packet.
     // Returns false if packet cannot be sent.
-    virtual bool TimeToSendPacket(uint32_t ssrc,
-                                  uint16_t sequence_number,
-                                  int64_t capture_time_ms,
-                                  bool retransmission,
-                                  const PacedPacketInfo& cluster_info) = 0;
+    virtual RtpPacketSendResult TimeToSendPacket(
+        uint32_t ssrc,
+        uint16_t sequence_number,
+        int64_t capture_time_ms,
+        bool retransmission,
+        const PacedPacketInfo& cluster_info) = 0;
     // Called when it's a good time to send a padding data.
     // Returns the number of bytes sent.
     virtual size_t TimeToSendPadding(size_t bytes,
@@ -150,11 +151,6 @@ class PacedSender : public Pacer {
   void SetQueueTimeLimit(int limit_ms);
 
  private:
-  PacedSender(Clock* clock,
-              PacketSender* packet_sender,
-              RtcEventLog* event_log,
-              const WebRtcKeyValueConfig& field_trials);
-
   int64_t UpdateTimeAndGetElapsedMs(int64_t now_us)
       RTC_EXCLUSIVE_LOCKS_REQUIRED(critsect_);
   bool ShouldSendKeepalive(int64_t at_time_us) const
@@ -179,6 +175,8 @@ class PacedSender : public Pacer {
 
   Clock* const clock_;
   PacketSender* const packet_sender_;
+  const std::unique_ptr<FieldTrialBasedConfig> fallback_field_trials_;
+  const WebRtcKeyValueConfig* field_trials_;
   std::unique_ptr<AlrDetector> alr_detector_ RTC_PT_GUARDED_BY(critsect_);
 
   const bool drain_large_queues_;

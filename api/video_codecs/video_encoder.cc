@@ -54,11 +54,6 @@ VideoCodecH264 VideoEncoder::GetDefaultH264Settings() {
   h264_settings.frameDroppingOn = true;
   h264_settings.keyFrameInterval = 3000;
   h264_settings.numberOfTemporalLayers = 1;
-  h264_settings.spsData = nullptr;
-  h264_settings.spsLen = 0;
-  h264_settings.ppsData = nullptr;
-  h264_settings.ppsLen = 0;
-  h264_settings.profile = H264::kProfileConstrainedBaseline;
 
   return h264_settings;
 }
@@ -108,6 +103,13 @@ VideoEncoder::RateControlParameters::RateControlParameters()
 
 VideoEncoder::RateControlParameters::RateControlParameters(
     const VideoBitrateAllocation& bitrate,
+    double framerate_fps)
+    : bitrate(bitrate),
+      framerate_fps(framerate_fps),
+      bandwidth_allocation(DataRate::bps(bitrate.get_sum_bps())) {}
+
+VideoEncoder::RateControlParameters::RateControlParameters(
+    const VideoBitrateAllocation& bitrate,
     double framerate_fps,
     DataRate bandwidth_allocation)
     : bitrate(bitrate),
@@ -115,22 +117,6 @@ VideoEncoder::RateControlParameters::RateControlParameters(
       bandwidth_allocation(bandwidth_allocation) {}
 
 VideoEncoder::RateControlParameters::~RateControlParameters() = default;
-
-int32_t VideoEncoder::SetRates(uint32_t bitrate, uint32_t framerate) {
-  RTC_NOTREACHED() << "SetRate(uint32_t, uint32_t) is deprecated.";
-  return -1;
-}
-
-int32_t VideoEncoder::SetRateAllocation(
-    const VideoBitrateAllocation& allocation,
-    uint32_t framerate) {
-  return SetRates(allocation.get_sum_kbps(), framerate);
-}
-
-void VideoEncoder::SetRates(const RateControlParameters& parameters) {
-  SetRateAllocation(parameters.bitrate,
-                    static_cast<uint32_t>(parameters.framerate_fps + 0.5));
-}
 
 void VideoEncoder::OnPacketLossRateUpdate(float packet_loss_rate) {}
 

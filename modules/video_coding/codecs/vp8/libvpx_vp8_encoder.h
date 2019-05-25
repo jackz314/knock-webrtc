@@ -54,8 +54,7 @@ class LibvpxVp8Encoder : public VideoEncoder {
 
   int RegisterEncodeCompleteCallback(EncodedImageCallback* callback) override;
 
-  int SetRateAllocation(const VideoBitrateAllocation& bitrate,
-                        uint32_t new_framerate) override;
+  void SetRates(const RateControlParameters& parameters) override;
 
   void OnPacketLossRateUpdate(float packet_loss_rate) override;
 
@@ -94,6 +93,8 @@ class LibvpxVp8Encoder : public VideoEncoder {
 
   size_t SteadyStateSize(int sid, int tid);
 
+  bool UpdateVpxConfiguration(size_t stream_index);
+
   const std::unique_ptr<LibvpxInterface> libvpx_;
 
   const absl::optional<std::vector<CpuSpeedExperiment::Config>>
@@ -117,7 +118,8 @@ class LibvpxVp8Encoder : public VideoEncoder {
   std::vector<vpx_image_t> raw_images_;
   std::vector<EncodedImage> encoded_images_;
   std::vector<vpx_codec_ctx_t> encoders_;
-  std::vector<vpx_codec_enc_cfg_t> configurations_;
+  std::vector<vpx_codec_enc_cfg_t> vpx_configs_;
+  std::vector<Vp8EncoderConfig> config_overrides_;
   std::vector<vpx_rational_t> downsampling_factors_;
 
   // Variable frame-rate screencast related fields and methods.

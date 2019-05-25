@@ -76,6 +76,7 @@ struct RTC_EXPORT EchoCanceller3Config {
     float initial_state_seconds = 2.5f;
     bool conservative_initial_phase = false;
     bool enable_shadow_filter_output_usage = true;
+    bool use_linear_filter = true;
   } filter;
 
   struct Erle {
@@ -101,7 +102,7 @@ struct RTC_EXPORT EchoCanceller3Config {
     float audibility_threshold_lf = 10;
     float audibility_threshold_mf = 10;
     float audibility_threshold_hf = 10;
-    bool use_stationary_properties = false;
+    bool use_stationarity_properties = false;
     bool use_stationarity_properties_at_init = false;
   } echo_audibility;
 

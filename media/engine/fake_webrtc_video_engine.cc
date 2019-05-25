@@ -57,7 +57,6 @@ int32_t FakeWebRtcVideoDecoder::InitDecode(const webrtc::VideoCodec*, int32_t) {
 
 int32_t FakeWebRtcVideoDecoder::Decode(const webrtc::EncodedImage&,
                                        bool,
-                                       const webrtc::CodecSpecificInfo*,
                                        int64_t) {
   num_frames_received_++;
   return WEBRTC_VIDEO_CODEC_OK;
@@ -166,10 +165,7 @@ int32_t FakeWebRtcVideoEncoder::Release() {
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t FakeWebRtcVideoEncoder::SetRateAllocation(
-    const webrtc::VideoBitrateAllocation& allocation,
-    uint32_t framerate) {
-  return WEBRTC_VIDEO_CODEC_OK;
+void FakeWebRtcVideoEncoder::SetRates(const RateControlParameters& parameters) {
 }
 
 webrtc::VideoEncoder::EncoderInfo FakeWebRtcVideoEncoder::GetEncoderInfo()

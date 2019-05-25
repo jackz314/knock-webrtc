@@ -407,11 +407,12 @@ bool ModuleRtpRtcpImpl::OnSendingRtpFrame(uint32_t timestamp,
   return true;
 }
 
-bool ModuleRtpRtcpImpl::TimeToSendPacket(uint32_t ssrc,
-                                         uint16_t sequence_number,
-                                         int64_t capture_time_ms,
-                                         bool retransmission,
-                                         const PacedPacketInfo& pacing_info) {
+RtpPacketSendResult ModuleRtpRtcpImpl::TimeToSendPacket(
+    uint32_t ssrc,
+    uint16_t sequence_number,
+    int64_t capture_time_ms,
+    bool retransmission,
+    const PacedPacketInfo& pacing_info) {
   return rtp_sender_->TimeToSendPacket(ssrc, sequence_number, capture_time_ms,
                                        retransmission, pacing_info);
 }
@@ -510,13 +511,6 @@ int32_t ModuleRtpRtcpImpl::SendRTCP(RTCPPacketType packet_type) {
   return rtcp_sender_.SendRTCP(GetFeedbackState(), packet_type);
 }
 
-// Force a send of an RTCP packet.
-// Normal SR and RR are triggered via the process function.
-int32_t ModuleRtpRtcpImpl::SendCompoundRTCP(
-    const std::set<RTCPPacketType>& packet_types) {
-  return rtcp_sender_.SendCompoundRTCP(GetFeedbackState(), packet_types);
-}
-
 int32_t ModuleRtpRtcpImpl::SetRTCPApplicationSpecificData(
     const uint8_t sub_type,
     const uint32_t name,
@@ -542,6 +536,8 @@ int32_t ModuleRtpRtcpImpl::DataCountersRTP(size_t* bytes_sent,
   rtp_sender_->GetDataCounters(&rtp_stats, &rtx_stats);
 
   if (bytes_sent) {
+    // TODO(http://crbug.com/webrtc/10525): Bytes sent should only include
+    // payload bytes, not header and padding bytes.
     *bytes_sent = rtp_stats.transmitted.payload_bytes +
                   rtp_stats.transmitted.padding_bytes +
                   rtp_stats.transmitted.header_bytes +
@@ -863,6 +859,11 @@ void ModuleRtpRtcpImpl::RegisterSendChannelRtpStatisticsCallback(
 StreamDataCountersCallback*
 ModuleRtpRtcpImpl::GetSendChannelRtpStatisticsCallback() const {
   return rtp_sender_->GetRtpStatisticsCallback();
+}
+
+AcknowledgedPacketsObserver* ModuleRtpRtcpImpl::GetAcknowledgedPacketsObserver()
+    const {
+  return rtp_sender_.get();
 }
 
 void ModuleRtpRtcpImpl::SetVideoBitrateAllocation(
