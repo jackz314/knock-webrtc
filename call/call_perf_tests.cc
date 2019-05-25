@@ -244,7 +244,7 @@ void CallPerfTest::TestAudioVideoSync(FecMode fec,
     CreateMatchingReceiveConfigs(receive_transport.get());
 
     AudioSendStream::Config audio_send_config(audio_send_transport.get(),
-                                              /*media_transport=*/nullptr);
+                                              MediaTransportConfig());
     audio_send_config.rtp.ssrc = kAudioSendSsrc;
     audio_send_config.send_codec_spec = AudioSendStream::Config::SendCodecSpec(
         kAudioSendPayloadType, {"ISAC", 16000, 1});
@@ -774,14 +774,13 @@ TEST_F(CallPerfTest, MAYBE_KeepsHighBitrateWhenReconfiguringSender) {
       return FakeEncoder::InitEncode(config, number_of_cores, max_payload_size);
     }
 
-    int32_t SetRateAllocation(const VideoBitrateAllocation& rate_allocation,
-                              uint32_t framerate) override {
-      last_set_bitrate_kbps_ = rate_allocation.get_sum_kbps();
+    void SetRates(const RateControlParameters& parameters) override {
+      last_set_bitrate_kbps_ = parameters.bitrate.get_sum_kbps();
       if (encoder_inits_ == 1 &&
-          rate_allocation.get_sum_kbps() > kReconfigureThresholdKbps) {
+          parameters.bitrate.get_sum_kbps() > kReconfigureThresholdKbps) {
         time_to_reconfigure_.Set();
       }
-      return FakeEncoder::SetRateAllocation(rate_allocation, framerate);
+      FakeEncoder::SetRates(parameters);
     }
 
     void ModifySenderBitrateConfig(

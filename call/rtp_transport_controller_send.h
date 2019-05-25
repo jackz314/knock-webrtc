@@ -110,10 +110,7 @@ class RtpTransportControllerSend final
                                     int64_t now_ms) override;
 
   // Implements TransportFeedbackObserver interface
-  void AddPacket(uint32_t ssrc,
-                 uint16_t sequence_number,
-                 size_t length,
-                 const PacedPacketInfo& pacing_info) override;
+  void OnAddPacket(const RtpPacketSendInfo& packet_info) override;
   void OnTransportFeedback(const rtcp::TransportFeedback& feedback) override;
 
  private:
@@ -132,6 +129,8 @@ class RtpTransportControllerSend final
   void UpdateControlState() RTC_RUN_ON(task_queue_);
 
   Clock* const clock_;
+  RtcEventLog* const event_log_;
+  const FieldTrialBasedConfig trial_based_config_;
   PacketRouter packet_router_;
   std::vector<std::unique_ptr<RtpVideoSenderInterface>> video_rtp_senders_;
   PacedSender pacer_;

@@ -30,15 +30,8 @@
 #include "system_wrappers/include/field_trial.h"
 
 namespace webrtc {
-// Interval for updating SS data.
-static const uint32_t kSsCleanupIntervalSec = 60;
-
 // Use this rtt if no value has been reported.
 static const int64_t kDefaultRtt = 200;
-
-// Request a keyframe if no continuous frame has been received for this
-// number of milliseconds and NACKs are disabled.
-static const int64_t kMaxDiscontinuousFramesTime = 1000;
 
 typedef std::pair<uint32_t, VCMFrameBuffer*> FrameListPair;
 
@@ -119,104 +112,6 @@ void FrameList::Reset(UnorderedFrameList* free_frames) {
   }
 }
 
-Vp9SsMap::Vp9SsMap() {}
-Vp9SsMap::~Vp9SsMap() {}
-
-bool Vp9SsMap::Insert(const VCMPacket& packet) {
-  const auto& vp9_header =
-      absl::get<RTPVideoHeaderVP9>(packet.video_header.video_type_header);
-  if (!vp9_header.ss_data_available)
-    return false;
-
-  ss_map_[packet.timestamp] = vp9_header.gof;
-  return true;
-}
-
-void Vp9SsMap::Reset() {
-  ss_map_.clear();
-}
-
-bool Vp9SsMap::Find(uint32_t timestamp, SsMap::iterator* it_out) {
-  bool found = false;
-  for (SsMap::iterator it = ss_map_.begin(); it != ss_map_.end(); ++it) {
-    if (it->first == timestamp || IsNewerTimestamp(timestamp, it->first)) {
-      *it_out = it;
-      found = true;
-    }
-  }
-  return found;
-}
-
-void Vp9SsMap::RemoveOld(uint32_t timestamp) {
-  if (!TimeForCleanup(timestamp))
-    return;
-
-  SsMap::iterator it;
-  if (!Find(timestamp, &it))
-    return;
-
-  ss_map_.erase(ss_map_.begin(), it);
-  AdvanceFront(timestamp);
-}
-
-bool Vp9SsMap::TimeForCleanup(uint32_t timestamp) const {
-  if (ss_map_.empty() || !IsNewerTimestamp(timestamp, ss_map_.begin()->first))
-    return false;
-
-  uint32_t diff = timestamp - ss_map_.begin()->first;
-  return diff / kVideoPayloadTypeFrequency >= kSsCleanupIntervalSec;
-}
-
-void Vp9SsMap::AdvanceFront(uint32_t timestamp) {
-  RTC_DCHECK(!ss_map_.empty());
-  GofInfoVP9 gof = ss_map_.begin()->second;
-  ss_map_.erase(ss_map_.begin());
-  ss_map_[timestamp] = gof;
-}
-
-// TODO(asapersson): Update according to updates in RTP payload profile.
-bool Vp9SsMap::UpdatePacket(VCMPacket* packet) {
-  auto& vp9_header =
-      absl::get<RTPVideoHeaderVP9>(packet->video_header.video_type_header);
-  uint8_t gof_idx = vp9_header.gof_idx;
-  if (gof_idx == kNoGofIdx)
-    return false;  // No update needed.
-
-  SsMap::iterator it;
-  if (!Find(packet->timestamp, &it))
-    return false;  // Corresponding SS not yet received.
-
-  if (gof_idx >= it->second.num_frames_in_gof)
-    return false;  // Assume corresponding SS not yet received.
-
-  vp9_header.temporal_idx = it->second.temporal_idx[gof_idx];
-  vp9_header.temporal_up_switch = it->second.temporal_up_switch[gof_idx];
-
-  // TODO(asapersson): Set vp9.ref_picture_id[i] and add usage.
-  vp9_header.num_ref_pics = it->second.num_ref_pics[gof_idx];
-  for (uint8_t i = 0; i < it->second.num_ref_pics[gof_idx]; ++i) {
-    vp9_header.pid_diff[i] = it->second.pid_diff[gof_idx][i];
-  }
-  return true;
-}
-
-void Vp9SsMap::UpdateFrames(FrameList* frames) {
-  for (const auto& frame_it : *frames) {
-    uint8_t gof_idx =
-        frame_it.second->CodecSpecific()->codecSpecific.VP9.gof_idx;
-    if (gof_idx == kNoGofIdx) {
-      continue;
-    }
-    SsMap::iterator ss_it;
-    if (Find(frame_it.second->Timestamp(), &ss_it)) {
-      if (gof_idx >= ss_it->second.num_frames_in_gof) {
-        continue;  // Assume corresponding SS not yet received.
-      }
-      frame_it.second->SetGofInfo(ss_it->second, gof_idx);
-    }
-  }
-}
-
 VCMJitterBuffer::VCMJitterBuffer(Clock* clock,
                                  std::unique_ptr<EventWrapper> event)
     : clock_(clock),
@@ -233,10 +128,6 @@ VCMJitterBuffer::VCMJitterBuffer(Clock* clock,
       num_duplicated_packets_(0),
       jitter_estimate_(clock),
       inter_frame_delay_(clock_->TimeInMilliseconds()),
-      rtt_ms_(kDefaultRtt),
-      nack_mode_(kNoNack),
-      low_rtt_nack_threshold_ms_(-1),
-      high_rtt_nack_threshold_ms_(-1),
       missing_sequence_numbers_(SequenceNumberLessThan()),
       latest_received_sequence_number_(0),
       max_nack_list_size_(0),
@@ -277,7 +168,6 @@ void VCMJitterBuffer::Start() {
   waiting_for_completion_.timestamp = 0;
   waiting_for_completion_.latest_packet_time = -1;
   first_packet_since_reset_ = true;
-  rtt_ms_ = kDefaultRtt;
   last_decoded_state_.Reset();
 
   decodable_frames_.Reset(&free_frames_);
@@ -391,8 +281,7 @@ VCMEncodedFrame* VCMJitterBuffer::ExtractAndSetDecode(uint32_t timestamp) {
   // Frame pulled out from jitter buffer, update the jitter estimate.
   const bool retransmitted = (frame->GetNackCount() > 0);
   if (retransmitted) {
-    if (WaitForRetransmissions())
-      jitter_estimate_.FrameNacked();
+    jitter_estimate_.FrameNacked();
   } else if (frame->size() > 0) {
     // Ignore retransmitted and empty frames.
     if (waiting_for_completion_.latest_packet_time >= 0) {
@@ -524,7 +413,7 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
 
   // Empty packets may bias the jitter estimate (lacking size component),
   // therefore don't let empty packet trigger the following updates:
-  if (packet.frameType != VideoFrameType::kEmptyFrame) {
+  if (packet.video_header.frame_type != VideoFrameType::kEmptyFrame) {
     if (waiting_for_completion_.timestamp == packet.timestamp) {
       // This can get bad if we have a lot of duplicate packets,
       // we will then count some packet multiple times.
@@ -543,7 +432,7 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
   VCMFrameBufferStateEnum previous_state = frame->GetState();
   // Insert packet.
   FrameData frame_data;
-  frame_data.rtt_ms = rtt_ms_;
+  frame_data.rtt_ms = kDefaultRtt;
   frame_data.rolling_average_packets_per_frame = average_packets_per_frame_;
   VCMFrameBufferEnum buffer_state =
       frame->InsertPacket(packet, now_ms, frame_data);
@@ -557,7 +446,7 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
         frame->IncrementNackCount();
       }
       if (!UpdateNackList(packet.seqNum) &&
-          packet.frameType != VideoFrameType::kVideoFrameKey) {
+          packet.video_header.frame_type != VideoFrameType::kVideoFrameKey) {
         buffer_state = kFlushIndicator;
       }
 
@@ -589,11 +478,6 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
         FindAndInsertContinuousFrames(*frame);
       } else {
         incomplete_frames_.InsertFrame(frame);
-        // If NACKs are enabled, keyframes are triggered by |GetNackList|.
-        if (nack_mode_ == kNoNack && NonContinuousOrIncompleteDuration() >
-                                         90 * kMaxDiscontinuousFramesTime) {
-          return kFlushIndicator;
-        }
       }
       break;
     }
@@ -604,11 +488,6 @@ VCMFrameBufferEnum VCMJitterBuffer::InsertPacket(const VCMPacket& packet,
         return kNoError;
       } else {
         incomplete_frames_.InsertFrame(frame);
-        // If NACKs are enabled, keyframes are triggered by |GetNackList|.
-        if (nack_mode_ == kNoNack && NonContinuousOrIncompleteDuration() >
-                                         90 * kMaxDiscontinuousFramesTime) {
-          return kFlushIndicator;
-        }
       }
       break;
     }
@@ -702,48 +581,8 @@ void VCMJitterBuffer::FindAndInsertContinuousFramesWithState(
 
 uint32_t VCMJitterBuffer::EstimatedJitterMs() {
   rtc::CritScope cs(&crit_sect_);
-  // Compute RTT multiplier for estimation.
-  // low_rtt_nackThresholdMs_ == -1 means no FEC.
-  double rtt_mult = 1.0f;
-  if (low_rtt_nack_threshold_ms_ >= 0 &&
-      rtt_ms_ >= low_rtt_nack_threshold_ms_) {
-    // For RTTs above low_rtt_nack_threshold_ms_ we don't apply extra delay
-    // when waiting for retransmissions.
-    rtt_mult = 0.0f;
-  }
+  const double rtt_mult = 1.0f;
   return jitter_estimate_.GetJitterEstimate(rtt_mult);
-}
-
-void VCMJitterBuffer::UpdateRtt(int64_t rtt_ms) {
-  rtc::CritScope cs(&crit_sect_);
-  rtt_ms_ = rtt_ms;
-  jitter_estimate_.UpdateRtt(rtt_ms);
-  if (!WaitForRetransmissions())
-    jitter_estimate_.ResetNackCount();
-}
-
-void VCMJitterBuffer::SetNackMode(VCMNackMode mode,
-                                  int64_t low_rtt_nack_threshold_ms,
-                                  int64_t high_rtt_nack_threshold_ms) {
-  rtc::CritScope cs(&crit_sect_);
-  nack_mode_ = mode;
-  if (mode == kNoNack) {
-    missing_sequence_numbers_.clear();
-  }
-  assert(low_rtt_nack_threshold_ms >= -1 && high_rtt_nack_threshold_ms >= -1);
-  assert(high_rtt_nack_threshold_ms == -1 ||
-         low_rtt_nack_threshold_ms <= high_rtt_nack_threshold_ms);
-  assert(low_rtt_nack_threshold_ms > -1 || high_rtt_nack_threshold_ms == -1);
-  low_rtt_nack_threshold_ms_ = low_rtt_nack_threshold_ms;
-  high_rtt_nack_threshold_ms_ = high_rtt_nack_threshold_ms;
-  // Don't set a high start rtt if high_rtt_nack_threshold_ms_ is used, to not
-  // disable NACK in |kNack| mode.
-  if (rtt_ms_ == kDefaultRtt && high_rtt_nack_threshold_ms_ != -1) {
-    rtt_ms_ = 0;
-  }
-  if (!WaitForRetransmissions()) {
-    jitter_estimate_.ResetNackCount();
-  }
 }
 
 void VCMJitterBuffer::SetNackSettings(size_t max_nack_list_size,
@@ -755,11 +594,6 @@ void VCMJitterBuffer::SetNackSettings(size_t max_nack_list_size,
   max_nack_list_size_ = max_nack_list_size;
   max_packet_age_to_nack_ = max_packet_age_to_nack;
   max_incomplete_time_ms_ = max_incomplete_time_ms;
-}
-
-VCMNackMode VCMJitterBuffer::nack_mode() const {
-  rtc::CritScope cs(&crit_sect_);
-  return nack_mode_;
 }
 
 int VCMJitterBuffer::NonContinuousOrIncompleteDuration() {
@@ -787,9 +621,6 @@ uint16_t VCMJitterBuffer::EstimatedLowSequenceNumber(
 std::vector<uint16_t> VCMJitterBuffer::GetNackList(bool* request_key_frame) {
   rtc::CritScope cs(&crit_sect_);
   *request_key_frame = false;
-  if (nack_mode_ == kNoNack) {
-    return std::vector<uint16_t>();
-  }
   if (last_decoded_state_.in_initial_state()) {
     VCMFrameBuffer* next_frame = NextFrame();
     const bool first_frame_is_key =
@@ -854,9 +685,6 @@ VCMFrameBuffer* VCMJitterBuffer::NextFrame() const {
 }
 
 bool VCMJitterBuffer::UpdateNackList(uint16_t sequence_number) {
-  if (nack_mode_ == kNoNack) {
-    return true;
-  }
   // Make sure we don't add packets which are already too old to be decoded.
   if (!last_decoded_state_.in_initial_state()) {
     latest_received_sequence_number_ = LatestSequenceNumber(
@@ -1063,20 +891,6 @@ void VCMJitterBuffer::UpdateJitterEstimate(int64_t latest_packet_time_ms,
     // Update the jitter estimate with the new samples
     jitter_estimate_.UpdateEstimate(frame_delay, frame_size, incomplete_frame);
   }
-}
-
-bool VCMJitterBuffer::WaitForRetransmissions() {
-  if (nack_mode_ == kNoNack) {
-    // NACK disabled -> don't wait for retransmissions.
-    return false;
-  }
-  // Evaluate if the RTT is higher than |high_rtt_nack_threshold_ms_|, and in
-  // that case we don't wait for retransmissions.
-  if (high_rtt_nack_threshold_ms_ >= 0 &&
-      rtt_ms_ >= high_rtt_nack_threshold_ms_) {
-    return false;
-  }
-  return true;
 }
 
 void VCMJitterBuffer::RecycleFrameBuffer(VCMFrameBuffer* frame) {

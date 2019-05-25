@@ -19,9 +19,6 @@ namespace webrtc {
 
 VideoStreamDecoder::VideoStreamDecoder(
     vcm::VideoReceiver* video_receiver,
-    VCMPacketRequestCallback* vcm_packet_request_callback,
-    bool enable_nack,
-    bool enable_fec,
     ReceiveStatisticsProxy* receive_statistics_proxy,
     rtc::VideoSinkInterface<VideoFrame>* incoming_video_stream)
     : video_receiver_(video_receiver),
@@ -29,19 +26,7 @@ VideoStreamDecoder::VideoStreamDecoder(
       incoming_video_stream_(incoming_video_stream) {
   RTC_DCHECK(video_receiver_);
 
-  static const int kMaxPacketAgeToNack = 450;
-  static const int kMaxNackListSize = 250;
-  video_receiver_->SetNackSettings(kMaxNackListSize, kMaxPacketAgeToNack, 0);
   video_receiver_->RegisterReceiveCallback(this);
-
-  VCMVideoProtection video_protection =
-      enable_nack ? (enable_fec ? kProtectionNackFEC : kProtectionNack)
-                  : kProtectionNone;
-
-  video_receiver_->SetVideoProtection(video_protection, true);
-  VCMPacketRequestCallback* packet_request_callback =
-      enable_nack ? vcm_packet_request_callback : nullptr;
-  video_receiver_->RegisterPacketRequestCallback(packet_request_callback);
 }
 
 VideoStreamDecoder::~VideoStreamDecoder() {
@@ -50,7 +35,6 @@ VideoStreamDecoder::~VideoStreamDecoder() {
   // callbacks.
 
   // Unset all the callback pointers that we set in the ctor.
-  video_receiver_->RegisterPacketRequestCallback(nullptr);
   video_receiver_->RegisterReceiveCallback(nullptr);
 }
 
@@ -63,12 +47,6 @@ int32_t VideoStreamDecoder::FrameToRender(VideoFrame& video_frame,
                                           VideoContentType content_type) {
   receive_stats_callback_->OnDecodedFrame(video_frame, qp, content_type);
   incoming_video_stream_->OnFrame(video_frame);
-  return 0;
-}
-
-int32_t VideoStreamDecoder::ReceivedDecodedReferenceFrame(
-    const uint64_t picture_id) {
-  RTC_NOTREACHED();
   return 0;
 }
 

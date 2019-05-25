@@ -25,6 +25,7 @@
 #include "pc/peer_connection_factory.h"
 #include "pc/peer_connection_internal.h"
 #include "pc/rtc_stats_collector.h"
+#include "pc/rtp_sender.h"
 #include "pc/rtp_transceiver.h"
 #include "pc/sctp_transport.h"
 #include "pc/stats_collector.h"
@@ -57,6 +58,7 @@ class PeerConnection : public PeerConnectionInternal,
                        public DataChannelProviderInterface,
                        public DataChannelSink,
                        public JsepTransportController::Observer,
+                       public RtpSenderBase::SetStreamsObserver,
                        public rtc::MessageHandler,
                        public sigslot::has_slots<> {
  public:
@@ -73,7 +75,10 @@ class PeerConnection : public PeerConnectionInternal,
     ICE_STATE_CONNECTED = 0x200,
     CLOSE_CALLED = 0x400,
     PRIVATE_CANDIDATE_COLLECTED = 0x800,
-    MAX_VALUE = 0x1000,
+    REMOTE_PRIVATE_CANDIDATE_ADDED = 0x1000,
+    MDNS_CANDIDATE_COLLECTED = 0x2000,
+    REMOTE_MDNS_CANDIDATE_ADDED = 0x4000,
+    MAX_VALUE = 0x8000,
   };
 
   explicit PeerConnection(PeerConnectionFactory* factory,
@@ -208,6 +213,7 @@ class PeerConnection : public PeerConnectionInternal,
                                        int64_t max_size_bytes) override;
   bool StartRtcEventLog(std::unique_ptr<RtcEventLogOutput> output,
                         int64_t output_period_ms) override;
+  bool StartRtcEventLog(std::unique_ptr<RtcEventLogOutput> output) override;
   void StopRtcEventLog() override;
 
   void Close() override;
@@ -873,9 +879,6 @@ class PeerConnection : public PeerConnectionInternal,
   // down to all of the channels.
   RTCError PushdownMediaDescription(SdpType type, cricket::ContentSource source)
       RTC_RUN_ON(signaling_thread());
-  bool PushdownSctpParameters_n(cricket::ContentSource source,
-                                int local_sctp_port,
-                                int remote_sctp_port);
 
   RTCError PushdownTransportDescription(cricket::ContentSource source,
                                         SdpType type);
@@ -908,6 +911,9 @@ class PeerConnection : public PeerConnectionInternal,
   // Uses |candidate| in this session.
   bool UseCandidate(const IceCandidateInterface* candidate)
       RTC_RUN_ON(signaling_thread());
+  RTCErrorOr<const cricket::ContentInfo*> FindContentInfo(
+      const SessionDescriptionInterface* description,
+      const IceCandidateInterface* candidate) RTC_RUN_ON(signaling_thread());
   // Deletes the corresponding channel of contents that don't exist in |desc|.
   // |desc| can be null. This means that all channels are deleted.
   void RemoveUnusedChannels(const cricket::SessionDescription* desc)
@@ -1054,6 +1060,9 @@ class PeerConnection : public PeerConnectionInternal,
                           rtc::scoped_refptr<DtlsTransport> dtls_transport,
                           MediaTransportInterface* media_transport) override;
 
+  // RtpSenderBase::SetStreamsObserver override.
+  void OnSetStreams() override;
+
   // Returns the observer. Will crash on CHECK if the observer is removed.
   PeerConnectionObserver* Observer() const RTC_RUN_ON(signaling_thread());
 
@@ -1070,21 +1079,8 @@ class PeerConnection : public PeerConnectionInternal,
     return rtp_transport;
   }
 
-  // Returns media transport, if PeerConnection was created with configuration
-  // to use media transport. Otherwise returns nullptr.
-  MediaTransportInterface* GetMediaTransport(const std::string& mid)
-      RTC_RUN_ON(signaling_thread()) {
-    auto media_transport = transport_controller_->GetMediaTransport(mid);
-    RTC_DCHECK((configuration_.use_media_transport ||
-                configuration_.use_media_transport_for_data_channels) ==
-               (media_transport != nullptr))
-        << "configuration_.use_media_transport="
-        << configuration_.use_media_transport
-        << ", configuration_.use_media_transport_for_data_channels="
-        << configuration_.use_media_transport_for_data_channels
-        << ", (media_transport != nullptr)=" << (media_transport != nullptr);
-    return media_transport;
-  }
+  void UpdateNegotiationNeeded();
+  bool CheckIfNegotiationIsNeeded();
 
   sigslot::signal1<DataChannel*> SignalDataChannelCreated_
       RTC_GUARDED_BY(signaling_thread());
@@ -1329,6 +1325,16 @@ class PeerConnection : public PeerConnectionInternal,
   // channel manager and the session description factory.
   rtc::UniqueRandomIdGenerator ssrc_generator_
       RTC_GUARDED_BY(signaling_thread());
+
+  // A video bitrate allocator factory.
+  // This can injected using the PeerConnectionDependencies,
+  // or else the CreateBuiltinVideoBitrateAllocatorFactory() will be called.
+  // Note that one can still choose to override this in a MediaEngine
+  // if one wants too.
+  std::unique_ptr<webrtc::VideoBitrateAllocatorFactory>
+      video_bitrate_allocator_factory_;
+
+  bool is_negotiation_needed_ RTC_GUARDED_BY(signaling_thread()) = false;
 };
 
 }  // namespace webrtc

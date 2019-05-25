@@ -67,11 +67,11 @@ std::string VideoReceiveStream::Stats::ToString(int64_t time_ms) const {
 VideoReceiveStream::Config::Config(const Config&) = default;
 VideoReceiveStream::Config::Config(Config&&) = default;
 VideoReceiveStream::Config::Config(Transport* rtcp_send_transport,
-                                   MediaTransportInterface* media_transport)
+                                   MediaTransportConfig media_transport_config)
     : rtcp_send_transport(rtcp_send_transport),
-      media_transport(media_transport) {}
+      media_transport_config(media_transport_config) {}
 VideoReceiveStream::Config::Config(Transport* rtcp_send_transport)
-    : Config(rtcp_send_transport, nullptr) {}
+    : Config(rtcp_send_transport, MediaTransportConfig()) {}
 
 VideoReceiveStream::Config& VideoReceiveStream::Config::operator=(Config&&) =
     default;
@@ -116,6 +116,7 @@ std::string VideoReceiveStream::Config::Rtp::ToString() const {
   ss << '}';
   ss << ", remb: " << (remb ? "on" : "off");
   ss << ", transport_cc: " << (transport_cc ? "on" : "off");
+  ss << ", lntf: {enabled: " << (lntf.enabled ? "true" : "false") << '}';
   ss << ", nack: {rtp_history_ms: " << nack.rtp_history_ms << '}';
   ss << ", ulpfec_payload_type: " << ulpfec_payload_type;
   ss << ", red_type: " << red_payload_type;
@@ -123,6 +124,11 @@ std::string VideoReceiveStream::Config::Rtp::ToString() const {
   ss << ", rtx_payload_types: {";
   for (auto& kv : rtx_associated_payload_types) {
     ss << kv.first << " (pt) -> " << kv.second << " (apt), ";
+  }
+  ss << '}';
+  ss << ", raw_payload_types: {";
+  for (const auto& pt : raw_payload_types) {
+    ss << pt << ", ";
   }
   ss << '}';
   ss << ", extensions: [";

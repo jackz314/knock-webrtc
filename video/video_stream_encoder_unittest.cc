@@ -12,9 +12,10 @@
 
 #include <algorithm>
 #include <limits>
+#include <memory>
 #include <utility>
 
-#include "api/task_queue/global_task_queue_factory.h"
+#include "api/task_queue/default_task_queue_factory.h"
 #include "api/video/builtin_video_bitrate_allocator_factory.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_bitrate_allocation.h"
@@ -99,7 +100,8 @@ class CpuOveruseDetectorProxy : public OveruseFrameDetector {
 class VideoStreamEncoderUnderTest : public VideoStreamEncoder {
  public:
   VideoStreamEncoderUnderTest(SendStatisticsProxy* stats_proxy,
-                              const VideoStreamEncoderSettings& settings)
+                              const VideoStreamEncoderSettings& settings,
+                              TaskQueueFactory* task_queue_factory)
       : VideoStreamEncoder(Clock::GetRealTimeClock(),
                            1 /* number_of_cores */,
                            stats_proxy,
@@ -107,7 +109,7 @@ class VideoStreamEncoderUnderTest : public VideoStreamEncoder {
                            std::unique_ptr<OveruseFrameDetector>(
                                overuse_detector_proxy_ =
                                    new CpuOveruseDetectorProxy(stats_proxy)),
-                           &GlobalTaskQueueFactory()) {}
+                           task_queue_factory) {}
 
   void PostTaskAndWait(bool down, AdaptReason reason) {
     rtc::Event event;
@@ -288,6 +290,7 @@ class VideoStreamEncoderTest : public ::testing::Test {
         codec_width_(320),
         codec_height_(240),
         max_framerate_(kDefaultFramerate),
+        task_queue_factory_(CreateDefaultTaskQueueFactory()),
         fake_encoder_(),
         encoder_factory_(&fake_encoder_),
         bitrate_allocator_factory_(CreateBuiltinVideoBitrateAllocatorFactory()),
@@ -317,7 +320,7 @@ class VideoStreamEncoderTest : public ::testing::Test {
         video_encoder_config.video_stream_factory->CreateEncoderStreams(
             codec_width_, codec_height_, video_encoder_config);
     max_framerate_ = streams[0].max_framerate;
-    fake_clock_.SetTimeMicros(1234);
+    fake_clock_.SetTime(Timestamp::us(1234));
 
     ConfigureEncoder(std::move(video_encoder_config));
   }
@@ -326,7 +329,8 @@ class VideoStreamEncoderTest : public ::testing::Test {
     if (video_stream_encoder_)
       video_stream_encoder_->Stop();
     video_stream_encoder_.reset(new VideoStreamEncoderUnderTest(
-        stats_proxy_.get(), video_send_config_.encoder_settings));
+        stats_proxy_.get(), video_send_config_.encoder_settings,
+        task_queue_factory_.get()));
     video_stream_encoder_->SetSink(&sink_, false /* rotation_applied */);
     video_stream_encoder_->SetSource(
         &video_source_, webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
@@ -523,28 +527,28 @@ class VideoStreamEncoderTest : public ::testing::Test {
 
   void WaitForEncodedFrame(int64_t expected_ntp_time) {
     sink_.WaitForEncodedFrame(expected_ntp_time);
-    fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerSec / max_framerate_);
+    fake_clock_.AdvanceTime(TimeDelta::seconds(1) / max_framerate_);
   }
 
   bool TimedWaitForEncodedFrame(int64_t expected_ntp_time, int64_t timeout_ms) {
     bool ok = sink_.TimedWaitForEncodedFrame(expected_ntp_time, timeout_ms);
-    fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerSec / max_framerate_);
+    fake_clock_.AdvanceTime(TimeDelta::seconds(1) / max_framerate_);
     return ok;
   }
 
   void WaitForEncodedFrame(uint32_t expected_width, uint32_t expected_height) {
     sink_.WaitForEncodedFrame(expected_width, expected_height);
-    fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerSec / max_framerate_);
+    fake_clock_.AdvanceTime(TimeDelta::seconds(1) / max_framerate_);
   }
 
   void ExpectDroppedFrame() {
     sink_.ExpectDroppedFrame();
-    fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerSec / max_framerate_);
+    fake_clock_.AdvanceTime(TimeDelta::seconds(1) / max_framerate_);
   }
 
   bool WaitForFrame(int64_t timeout_ms) {
     bool ok = sink_.WaitForFrame(timeout_ms);
-    fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerSec / max_framerate_);
+    fake_clock_.AdvanceTime(TimeDelta::seconds(1) / max_framerate_);
     return ok;
   }
 
@@ -726,24 +730,24 @@ class VideoStreamEncoderTest : public ::testing::Test {
       return FakeEncoder::Release();
     }
 
-    int32_t SetRateAllocation(const VideoBitrateAllocation& rate_allocation,
-                              uint32_t framerate) {
+    void SetRates(const RateControlParameters& parameters) {
       rtc::CritScope lock(&local_crit_sect_);
       VideoBitrateAllocation adjusted_rate_allocation;
       for (size_t si = 0; si < kMaxSpatialLayers; ++si) {
         for (size_t ti = 0; ti < kMaxTemporalStreams; ++ti) {
-          if (rate_allocation.HasBitrate(si, ti)) {
+          if (parameters.bitrate.HasBitrate(si, ti)) {
             adjusted_rate_allocation.SetBitrate(
                 si, ti,
-                static_cast<uint32_t>(rate_allocation.GetBitrate(si, ti) *
+                static_cast<uint32_t>(parameters.bitrate.GetBitrate(si, ti) *
                                       rate_factor_));
           }
         }
       }
-      last_framerate_ = framerate;
-      last_bitrate_allocation_ = rate_allocation;
-      return FakeEncoder::SetRateAllocation(adjusted_rate_allocation,
-                                            framerate);
+      last_framerate_ = static_cast<uint32_t>(parameters.framerate_fps + 0.5);
+      last_bitrate_allocation_ = parameters.bitrate;
+      RateControlParameters adjusted_paramters = parameters;
+      adjusted_paramters.bitrate = adjusted_rate_allocation;
+      FakeEncoder::SetRates(adjusted_paramters);
     }
 
     rtc::CriticalSection local_crit_sect_;
@@ -902,6 +906,7 @@ class VideoStreamEncoderTest : public ::testing::Test {
   int codec_width_;
   int codec_height_;
   int max_framerate_;
+  const std::unique_ptr<TaskQueueFactory> task_queue_factory_;
   TestEncoder fake_encoder_;
   test::VideoEncoderProxyFactory encoder_factory_;
   std::unique_ptr<VideoBitrateAllocatorFactory> bitrate_allocator_factory_;
@@ -2329,7 +2334,9 @@ TEST_F(VideoStreamEncoderTest, CallsBitrateObserver) {
       fake_encoder_.GetAndResetLastBitrateAllocation();
   // Check that encoder has been updated too, not just allocation observer.
   EXPECT_EQ(bitrate_allocation->get_sum_bps(), kLowTargetBitrateBps);
-  fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerMillisec / kDefaultFps);
+  // TODO(srte): The use of millisecs here looks like an error, but the tests
+  // fails using seconds, this should be investigated.
+  fake_clock_.AdvanceTime(TimeDelta::ms(1) / kDefaultFps);
 
   // Not called on second frame.
   EXPECT_CALL(bitrate_observer, OnBitrateAllocationUpdated(expected_bitrate))
@@ -2337,7 +2344,7 @@ TEST_F(VideoStreamEncoderTest, CallsBitrateObserver) {
   video_source_.IncomingCapturedFrame(
       CreateFrame(rtc::TimeMillis(), codec_width_, codec_height_));
   WaitForEncodedFrame(rtc::TimeMillis());
-  fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerMillisec / kDefaultFps);
+  fake_clock_.AdvanceTime(TimeDelta::ms(1) / kDefaultFps);
 
   // Called after a process interval.
   const int64_t kProcessIntervalMs =
@@ -2349,7 +2356,7 @@ TEST_F(VideoStreamEncoderTest, CallsBitrateObserver) {
     video_source_.IncomingCapturedFrame(
         CreateFrame(rtc::TimeMillis(), codec_width_, codec_height_));
     WaitForEncodedFrame(rtc::TimeMillis());
-    fake_clock_.AdvanceTimeMicros(rtc::kNumMicrosecsPerMillisec / kDefaultFps);
+    fake_clock_.AdvanceTime(TimeDelta::ms(1) / kDefaultFps);
   }
 
   // Since rates are unchanged, encoder should not be reconfigured.
@@ -2954,8 +2961,7 @@ TEST_F(VideoStreamEncoderTest, DoesntAdaptDownPastMinFramerate) {
         sink_.WaitForEncodedFrame(timestamp_ms);
       }
       timestamp_ms += kFrameIntervalMs;
-      fake_clock_.AdvanceTimeMicros(kFrameIntervalMs *
-                                    rtc::kNumMicrosecsPerMillisec);
+      fake_clock_.AdvanceTime(TimeDelta::ms(kFrameIntervalMs));
     }
     // ...and then try to adapt again.
     video_stream_encoder_->TriggerCpuOveruse();
@@ -3492,9 +3498,8 @@ TEST_F(VideoStreamEncoderTest, DoesNotUpdateBitrateAllocationWhenSuspended) {
 
   // Skip ahead until a new periodic parameter update should have occured.
   timestamp_ms += vcm::VCMProcessTimer::kDefaultProcessIntervalMs;
-  fake_clock_.AdvanceTimeMicros(
-      vcm::VCMProcessTimer::kDefaultProcessIntervalMs *
-      rtc::kNumMicrosecsPerMillisec);
+  fake_clock_.AdvanceTime(
+      TimeDelta::ms(vcm::VCMProcessTimer::kDefaultProcessIntervalMs));
 
   // Bitrate observer should not be called.
   EXPECT_CALL(bitrate_observer, OnBitrateAllocationUpdated(_)).Times(0);
@@ -3747,10 +3752,13 @@ TEST_F(VideoStreamEncoderTest, SetsFrameTypesSimulcast) {
   video_stream_encoder_->SendKeyFrame();
   video_source_.IncomingCapturedFrame(CreateFrame(3, nullptr));
   WaitForEncodedFrame(3);
+
+  // TODO(webrtc:10615): Map keyframe request to spatial layer. Currently
+  // keyframe request on any layer triggers keyframe on all layers.
   EXPECT_THAT(fake_encoder_.LastFrameTypes(),
               ::testing::ElementsAreArray({VideoFrameType::kVideoFrameKey,
-                                           VideoFrameType::kVideoFrameDelta,
-                                           VideoFrameType::kVideoFrameDelta}));
+                                           VideoFrameType::kVideoFrameKey,
+                                           VideoFrameType::kVideoFrameKey}));
 
   video_stream_encoder_->Stop();
 }

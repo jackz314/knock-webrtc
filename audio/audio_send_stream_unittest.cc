@@ -73,6 +73,13 @@ const AudioCodecSpec kCodecSpecs[] = {
     {kOpusFormat, {48000, 1, 32000, 6000, 510000}},
     {kG722Format, {16000, 1, 64000}}};
 
+// TODO(dklee): This mirrors calculation in audio_send_stream.cc, which
+// should be made more precise in the future. This can be changed when that
+// logic is more accurate.
+const DataSize kOverheadPerPacket = DataSize::bytes(20 + 8 + 10 + 12);
+const TimeDelta kMaxFrameLength = TimeDelta::ms(60);
+const DataRate kOverheadRate = kOverheadPerPacket / kMaxFrameLength;
+
 class MockLimitObserver : public BitrateAllocator::LimitObserver {
  public:
   MOCK_METHOD3(OnAllocationLimitsChanged,
@@ -129,7 +136,7 @@ struct ConfigHelper {
   ConfigHelper(bool audio_bwe_enabled, bool expect_set_encoder_call)
       : clock_(1000000),
         task_queue_factory_(CreateDefaultTaskQueueFactory()),
-        stream_config_(/*send_transport=*/nullptr, /*media_transport=*/nullptr),
+        stream_config_(/*send_transport=*/nullptr, MediaTransportConfig()),
         audio_processing_(new rtc::RefCountedObject<MockAudioProcessing>()),
         bitrate_allocator_(&clock_, &limit_observer_),
         worker_queue_(task_queue_factory_->CreateTaskQueue(
@@ -314,7 +321,7 @@ struct ConfigHelper {
 
 TEST(AudioSendStreamTest, ConfigToString) {
   AudioSendStream::Config config(/*send_transport=*/nullptr,
-                                 /*media_transport=*/nullptr);
+                                 MediaTransportConfig());
   config.rtp.ssrc = kSsrc;
   config.rtp.c_name = kCName;
   config.min_bitrate_bps = 12000;
@@ -333,7 +340,7 @@ TEST(AudioSendStreamTest, ConfigToString) {
       "{rtp: {ssrc: 1234, extmap-allow-mixed: true, extensions: [{uri: "
       "urn:ietf:params:rtp-hdrext:ssrc-audio-level, id: 2}], "
       "c_name: foo_name}, rtcp_report_interval_ms: 2500, "
-      "send_transport: null, media_transport: null, "
+      "send_transport: null, media_transport_config: {media_transport: null}, "
       "min_bitrate_bps: 12000, max_bitrate_bps: 34000, "
       "send_codec_spec: {nack_enabled: true, transport_cc_enabled: false, "
       "cng_payload_type: 42, payload_type: 103, "
@@ -483,6 +490,97 @@ TEST(AudioSendStreamTest, DoesNotPassHigherBitrateThanMaxBitrate) {
   send_stream->OnBitrateUpdated(update);
 }
 
+TEST(AudioSendStreamTest, SSBweTargetInRangeRespected) {
+  ScopedFieldTrials field_trials("WebRTC-Audio-SendSideBwe/Enabled/");
+  ConfigHelper helper(true, true);
+  auto send_stream = helper.CreateAudioSendStream();
+  EXPECT_CALL(*helper.channel_send(),
+              OnBitrateAllocation(Field(
+                  &BitrateAllocationUpdate::target_bitrate,
+                  Eq(DataRate::bps(helper.config().max_bitrate_bps - 5000)))));
+  BitrateAllocationUpdate update;
+  update.target_bitrate = DataRate::bps(helper.config().max_bitrate_bps - 5000);
+  send_stream->OnBitrateUpdated(update);
+}
+
+TEST(AudioSendStreamTest, SSBweFieldTrialMinRespected) {
+  ScopedFieldTrials field_trials(
+      "WebRTC-Audio-SendSideBwe/Enabled/"
+      "WebRTC-Audio-Allocation/min:6kbps,max:64kbps/");
+  ConfigHelper helper(true, true);
+  auto send_stream = helper.CreateAudioSendStream();
+  EXPECT_CALL(
+      *helper.channel_send(),
+      OnBitrateAllocation(Field(&BitrateAllocationUpdate::target_bitrate,
+                                Eq(DataRate::kbps(6)))));
+  BitrateAllocationUpdate update;
+  update.target_bitrate = DataRate::kbps(1);
+  send_stream->OnBitrateUpdated(update);
+}
+
+TEST(AudioSendStreamTest, SSBweFieldTrialMaxRespected) {
+  ScopedFieldTrials field_trials(
+      "WebRTC-Audio-SendSideBwe/Enabled/"
+      "WebRTC-Audio-Allocation/min:6kbps,max:64kbps/");
+  ConfigHelper helper(true, true);
+  auto send_stream = helper.CreateAudioSendStream();
+  EXPECT_CALL(
+      *helper.channel_send(),
+      OnBitrateAllocation(Field(&BitrateAllocationUpdate::target_bitrate,
+                                Eq(DataRate::kbps(64)))));
+  BitrateAllocationUpdate update;
+  update.target_bitrate = DataRate::kbps(128);
+  send_stream->OnBitrateUpdated(update);
+}
+
+TEST(AudioSendStreamTest, SSBweWithOverhead) {
+  ScopedFieldTrials field_trials(
+      "WebRTC-Audio-SendSideBwe/Enabled/"
+      "WebRTC-SendSideBwe-WithOverhead/Enabled/");
+  ConfigHelper helper(true, true);
+  auto send_stream = helper.CreateAudioSendStream();
+  const DataRate bitrate =
+      DataRate::bps(helper.config().max_bitrate_bps) + kOverheadRate;
+  EXPECT_CALL(*helper.channel_send(),
+              OnBitrateAllocation(Field(
+                  &BitrateAllocationUpdate::target_bitrate, Eq(bitrate))));
+  BitrateAllocationUpdate update;
+  update.target_bitrate = bitrate;
+  send_stream->OnBitrateUpdated(update);
+}
+
+TEST(AudioSendStreamTest, SSBweWithOverheadMinRespected) {
+  ScopedFieldTrials field_trials(
+      "WebRTC-Audio-SendSideBwe/Enabled/"
+      "WebRTC-SendSideBwe-WithOverhead/Enabled/"
+      "WebRTC-Audio-Allocation/min:6kbps,max:64kbps/");
+  ConfigHelper helper(true, true);
+  auto send_stream = helper.CreateAudioSendStream();
+  const DataRate bitrate = DataRate::kbps(6) + kOverheadRate;
+  EXPECT_CALL(*helper.channel_send(),
+              OnBitrateAllocation(Field(
+                  &BitrateAllocationUpdate::target_bitrate, Eq(bitrate))));
+  BitrateAllocationUpdate update;
+  update.target_bitrate = DataRate::kbps(1);
+  send_stream->OnBitrateUpdated(update);
+}
+
+TEST(AudioSendStreamTest, SSBweWithOverheadMaxRespected) {
+  ScopedFieldTrials field_trials(
+      "WebRTC-Audio-SendSideBwe/Enabled/"
+      "WebRTC-SendSideBwe-WithOverhead/Enabled/"
+      "WebRTC-Audio-Allocation/min:6kbps,max:64kbps/");
+  ConfigHelper helper(true, true);
+  auto send_stream = helper.CreateAudioSendStream();
+  const DataRate bitrate = DataRate::kbps(64) + kOverheadRate;
+  EXPECT_CALL(*helper.channel_send(),
+              OnBitrateAllocation(Field(
+                  &BitrateAllocationUpdate::target_bitrate, Eq(bitrate))));
+  BitrateAllocationUpdate update;
+  update.target_bitrate = DataRate::kbps(128);
+  send_stream->OnBitrateUpdated(update);
+}
+
 TEST(AudioSendStreamTest, ProbingIntervalOnBitrateUpdated) {
   ConfigHelper helper(false, true);
   auto send_stream = helper.CreateAudioSendStream();
@@ -535,9 +633,6 @@ TEST(AudioSendStreamTest, ReconfigureTransportCcResetsFirst) {
                                             helper.transport(), Ne(nullptr)))
         .Times(1);
   }
-
-  // CallEncoder will be called to re-set overhead.
-  EXPECT_CALL(*helper.channel_send(), CallEncoder(::testing::_)).Times(1);
 
   send_stream->Reconfigure(new_config);
 }

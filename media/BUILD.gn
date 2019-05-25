@@ -78,6 +78,7 @@ rtc_static_library("rtc_media_base") {
     "../api:scoped_refptr",
     "../api/audio_codecs:audio_codecs_api",
     "../api/video:video_bitrate_allocation",
+    "../api/video:video_bitrate_allocator_factory",
     "../api/video:video_frame",
     "../api/video:video_frame_i420",
     "../api/video_codecs:video_codecs_api",
@@ -332,6 +333,31 @@ rtc_static_library("rtc_audio_video") {
   }
 }
 
+# Heavy but optional helper for unittests and webrtc users who prefer to use
+# defaults factories or do not worry about extra dependencies and binary size.
+rtc_source_set("rtc_media_engine_defaults") {
+  visibility = [ "*" ]
+  allow_poison = [
+    "audio_codecs",
+    "software_video_codecs",
+  ]
+  sources = [
+    "engine/webrtc_media_engine_defaults.cc",
+    "engine/webrtc_media_engine_defaults.h",
+  ]
+  deps = [
+    ":rtc_audio_video",
+    "../api/audio_codecs:builtin_audio_decoder_factory",
+    "../api/audio_codecs:builtin_audio_encoder_factory",
+    "../api/task_queue:default_task_queue_factory",
+    "../api/video:builtin_video_bitrate_allocator_factory",
+    "../api/video_codecs:builtin_video_decoder_factory",
+    "../api/video_codecs:builtin_video_encoder_factory",
+    "../modules/audio_processing:api",
+    "../rtc_base:checks",
+  ]
+}
+
 rtc_static_library("rtc_data") {
   defines = []
   deps = [
@@ -472,6 +498,7 @@ if (rtc_include_tests) {
       ":rtc_internal_video_codecs",
       ":rtc_media",
       ":rtc_media_base",
+      ":rtc_media_engine_defaults",
       ":rtc_media_tests_utils",
       ":rtc_simulcast_encoder_adapter",
       ":rtc_vp9_profile",
@@ -482,6 +509,7 @@ if (rtc_include_tests) {
       "../api:mock_video_bitrate_allocator",
       "../api:mock_video_bitrate_allocator_factory",
       "../api:mock_video_codec_factory",
+      "../api:mock_video_encoder",
       "../api:scoped_refptr",
       "../api:simulcast_test_fixture_api",
       "../api/audio_codecs:builtin_audio_decoder_factory",
@@ -517,18 +545,19 @@ if (rtc_include_tests) {
       "../rtc_base:checks",
       "../rtc_base:gunit_helpers",
       "../rtc_base:rtc_base_approved",
-      "../rtc_base:rtc_base_tests_main",
       "../rtc_base:rtc_base_tests_utils",
       "../rtc_base:rtc_task_queue",
       "../rtc_base:stringutils",
       "../rtc_base/third_party/sigslot",
       "../test:audio_codec_mocks",
       "../test:field_trial",
+      "../test:test_main",
       "../test:test_support",
       "../test:video_test_common",
       "//third_party/abseil-cpp/absl/algorithm:container",
       "//third_party/abseil-cpp/absl/memory",
       "//third_party/abseil-cpp/absl/strings",
+      "//third_party/abseil-cpp/absl/types:optional",
     ]
     sources = [
       "base/codec_unittest.cc",

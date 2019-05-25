@@ -87,8 +87,6 @@ class TestVCMReceiver : public ::testing::Test {
 };
 
 TEST_F(TestVCMReceiver, NonDecodableDuration_Empty) {
-  // Enable NACK and with no RTT thresholds for disabling retransmission delay.
-  receiver_.SetNackMode(kNack, -1, -1);
   const size_t kMaxNackListSize = 1000;
   const int kMaxPacketAgeToNack = 1000;
   const int kMaxNonDecodableDuration = 500;
@@ -105,8 +103,6 @@ TEST_F(TestVCMReceiver, NonDecodableDuration_Empty) {
 }
 
 TEST_F(TestVCMReceiver, NonDecodableDuration_NoKeyFrame) {
-  // Enable NACK and with no RTT thresholds for disabling retransmission delay.
-  receiver_.SetNackMode(kNack, -1, -1);
   const size_t kMaxNackListSize = 1000;
   const int kMaxPacketAgeToNack = 1000;
   const int kMaxNonDecodableDuration = 500;
@@ -122,8 +118,6 @@ TEST_F(TestVCMReceiver, NonDecodableDuration_NoKeyFrame) {
 }
 
 TEST_F(TestVCMReceiver, NonDecodableDuration_OneIncomplete) {
-  // Enable NACK and with no RTT thresholds for disabling retransmission delay.
-  receiver_.SetNackMode(kNack, -1, -1);
   const size_t kMaxNackListSize = 1000;
   const int kMaxPacketAgeToNack = 1000;
   const int kMaxNonDecodableDuration = 500;
@@ -152,8 +146,6 @@ TEST_F(TestVCMReceiver, NonDecodableDuration_OneIncomplete) {
 }
 
 TEST_F(TestVCMReceiver, NonDecodableDuration_NoTrigger) {
-  // Enable NACK and with no RTT thresholds for disabling retransmission delay.
-  receiver_.SetNackMode(kNack, -1, -1);
   const size_t kMaxNackListSize = 1000;
   const int kMaxPacketAgeToNack = 1000;
   const int kMaxNonDecodableDuration = 500;
@@ -184,8 +176,6 @@ TEST_F(TestVCMReceiver, NonDecodableDuration_NoTrigger) {
 }
 
 TEST_F(TestVCMReceiver, NonDecodableDuration_NoTrigger2) {
-  // Enable NACK and with no RTT thresholds for disabling retransmission delay.
-  receiver_.SetNackMode(kNack, -1, -1);
   const size_t kMaxNackListSize = 1000;
   const int kMaxPacketAgeToNack = 1000;
   const int kMaxNonDecodableDuration = 500;
@@ -216,8 +206,6 @@ TEST_F(TestVCMReceiver, NonDecodableDuration_NoTrigger2) {
 }
 
 TEST_F(TestVCMReceiver, NonDecodableDuration_KeyFrameAfterIncompleteFrames) {
-  // Enable NACK and with no RTT thresholds for disabling retransmission delay.
-  receiver_.SetNackMode(kNack, -1, -1);
   const size_t kMaxNackListSize = 1000;
   const int kMaxPacketAgeToNack = 1000;
   const int kMaxNonDecodableDuration = 500;
@@ -277,7 +265,7 @@ class SimulatedClockWithFrames : public SimulatedClock {
     bool frame_injected = false;
     while (!timestamps_.empty() &&
            timestamps_.front().arrive_time <= end_time) {
-      RTC_DCHECK(timestamps_.front().arrive_time >= start_time);
+      RTC_DCHECK_GE(timestamps_.front().arrive_time, start_time);
 
       SimulatedClock::AdvanceTimeMicroseconds(timestamps_.front().arrive_time -
                                               TimeInMicroseconds());
@@ -305,7 +293,7 @@ class SimulatedClockWithFrames : public SimulatedClock {
                  size_t size) {
     int64_t previous_arrive_timestamp = 0;
     for (size_t i = 0; i < size; i++) {
-      RTC_CHECK(arrive_timestamps[i] >= previous_arrive_timestamp);
+      RTC_CHECK_GE(arrive_timestamps[i], previous_arrive_timestamp);
       timestamps_.push(TimestampPair(arrive_timestamps[i] * 1000,
                                      render_timestamps[i] * 1000));
       previous_arrive_timestamp = arrive_timestamps[i];

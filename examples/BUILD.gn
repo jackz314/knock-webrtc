@@ -25,7 +25,6 @@ group("examples") {
   if (is_android) {
     deps += [
       ":AppRTCMobile",
-      ":AppRTCMobile_stubbed_video_io_test_apk",
       ":AppRTCMobile_test_apk",
       ":libwebrtc_unity",
     ]
@@ -180,51 +179,6 @@ if (is_android) {
       "//third_party/junit",
     ]
   }
-
-  group("video_quality_loopback_test") {
-    testonly = true
-
-    deps = [
-      ":AppRTCMobile_stubbed_video_io_test_apk",
-      "../rtc_tools:frame_analyzer_host",
-    ]
-
-    data = [
-      "../build/android/adb_reverse_forwarder.py",
-      "../examples/androidtests/video_quality_loopback_test.py",
-      "../resources/reference_video_640x360_30fps.y4m",
-      "../rtc_tools/compare_videos.py",
-      "../rtc_tools/testing/prebuilt_apprtc.zip",
-      "../rtc_tools/testing/golang/linux/go.tar.gz",
-      "../rtc_tools/testing/build_apprtc.py",
-      "../rtc_tools/testing/utils.py",
-      "../tools_webrtc/video_quality_toolchain/linux/ffmpeg",
-      "${root_out_dir}/frame_analyzer_host",
-    ]
-  }
-
-  rtc_instrumentation_test_apk("AppRTCMobile_stubbed_video_io_test_apk") {
-    apk_name = "AppRTCMobileTestStubbedVideoIO"
-    android_manifest = "androidtests/AndroidManifest.xml"
-
-    java_files = [ "androidtests/src/org/appspot/apprtc/test/CallActivityStubbedInputOutputTest.java" ]
-
-    apk_under_test = ":AppRTCMobile"
-
-    deps = [
-      ":AppRTCMobile_javalib",
-      "../sdk/android:libjingle_peerconnection_java",
-      "//third_party/android_support_test_runner:rules_java",
-      "//third_party/android_support_test_runner:runner_java",
-      "//third_party/espresso:espresso_all_java",
-      "//third_party/hamcrest:hamcrest_java",
-      "//third_party/junit",
-    ]
-
-    data = [
-      "../resources/reference_video_640x360_30fps.y4m",
-    ]
-  }
 }
 
 if (is_ios || (is_mac && target_cpu != "x86")) {
@@ -296,8 +250,6 @@ if (is_ios || (is_mac && target_cpu != "x86")) {
       "objc/AppRTCMobile/RTCIceCandidate+JSON.m",
       "objc/AppRTCMobile/RTCIceServer+JSON.h",
       "objc/AppRTCMobile/RTCIceServer+JSON.m",
-      "objc/AppRTCMobile/RTCMediaConstraints+JSON.h",
-      "objc/AppRTCMobile/RTCMediaConstraints+JSON.m",
       "objc/AppRTCMobile/RTCSessionDescription+JSON.h",
       "objc/AppRTCMobile/RTCSessionDescription+JSON.m",
     ]
@@ -401,7 +353,7 @@ if (is_ios || (is_mac && target_cpu != "x86")) {
           "$root_out_dir/AppRTCMobileBroadcastUpload.appex",
         ]
         outputs = [
-          "{{bundle_plugins_dir}}/{{source_file_part}}",
+          "{{bundle_contents_dir}}/Plugins/{{source_file_part}}",
         ]
       }
 
@@ -414,7 +366,7 @@ if (is_ios || (is_mac && target_cpu != "x86")) {
           "$root_out_dir/AppRTCMobileBroadcastSetupUI.appex",
         ]
         outputs = [
-          "{{bundle_plugins_dir}}/{{source_file_part}}",
+          "{{bundle_contents_dir}}/Plugins/{{source_file_part}}",
         ]
       }
 
@@ -508,7 +460,7 @@ if (is_ios || (is_mac && target_cpu != "x86")) {
         "../api:scoped_refptr",
         "../api/audio_codecs:builtin_audio_decoder_factory",
         "../api/audio_codecs:builtin_audio_encoder_factory",
-        "../api/video:builtin_video_bitrate_allocator_factory",
+        "../api/task_queue:default_task_queue_factory",
         "../logging:rtc_event_log_impl_base",
         "../media:rtc_audio_video",
         "../modules/audio_processing",

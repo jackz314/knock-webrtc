@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 
+#include "api/media_transport_config.h"
 #include "media/base/fake_network_interface.h"
 #include "media/base/media_constants.h"
 #include "media/base/rtp_data_engine.h"
@@ -58,9 +59,7 @@ class RtpDataMediaChannelTest : public ::testing::Test {
     receiver_.reset(new FakeDataReceiver());
   }
 
-  void SetNow(double now) {
-    clock_.SetTimeNanos(now * rtc::kNumNanosecsPerSec);
-  }
+  void SetNow(double now) { clock_.SetTime(webrtc::Timestamp::seconds(now)); }
 
   cricket::RtpDataEngine* CreateEngine() {
     cricket::RtpDataEngine* dme = new cricket::RtpDataEngine();
@@ -75,7 +74,7 @@ class RtpDataMediaChannelTest : public ::testing::Test {
     cricket::MediaConfig config;
     cricket::RtpDataMediaChannel* channel =
         static_cast<cricket::RtpDataMediaChannel*>(dme->CreateChannel(config));
-    channel->SetInterface(iface_.get(), /*media_transport=*/nullptr);
+    channel->SetInterface(iface_.get(), webrtc::MediaTransportConfig());
     channel->SignalDataReceived.connect(receiver_.get(),
                                         &FakeDataReceiver::OnDataReceived);
     return channel;

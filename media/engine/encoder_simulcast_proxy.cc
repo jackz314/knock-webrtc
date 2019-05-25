@@ -55,18 +55,16 @@ int EncoderSimulcastProxy::RegisterEncodeCompleteCallback(
   return encoder_->RegisterEncodeCompleteCallback(callback);
 }
 
-int EncoderSimulcastProxy::SetRateAllocation(
-    const VideoBitrateAllocation& bitrate,
-    uint32_t new_framerate) {
-  return encoder_->SetRateAllocation(bitrate, new_framerate);
+void EncoderSimulcastProxy::SetRates(const RateControlParameters& parameters) {
+  encoder_->SetRates(parameters);
 }
 
 void EncoderSimulcastProxy::OnPacketLossRateUpdate(float packet_loss_rate) {
-  return encoder_->OnPacketLossRateUpdate(packet_loss_rate);
+  encoder_->OnPacketLossRateUpdate(packet_loss_rate);
 }
 
 void EncoderSimulcastProxy::OnRttUpdate(int64_t rtt_ms) {
-  return encoder_->OnRttUpdate(rtt_ms);
+  encoder_->OnRttUpdate(rtt_ms);
 }
 
 void EncoderSimulcastProxy::OnLossNotification(

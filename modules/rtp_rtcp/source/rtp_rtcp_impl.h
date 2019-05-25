@@ -133,11 +133,12 @@ class ModuleRtpRtcpImpl : public RtpRtcp, public RTCPReceiver::ModuleRtpRtcp {
                          int payload_type,
                          bool force_sender_report) override;
 
-  bool TimeToSendPacket(uint32_t ssrc,
-                        uint16_t sequence_number,
-                        int64_t capture_time_ms,
-                        bool retransmission,
-                        const PacedPacketInfo& pacing_info) override;
+  RtpPacketSendResult TimeToSendPacket(
+      uint32_t ssrc,
+      uint16_t sequence_number,
+      int64_t capture_time_ms,
+      bool retransmission,
+      const PacedPacketInfo& pacing_info) override;
 
   // Returns the number of padding bytes actually sent, which can be more or
   // less than |bytes|.
@@ -182,9 +183,6 @@ class ModuleRtpRtcpImpl : public RtpRtcp, public RTCPReceiver::ModuleRtpRtcp {
   // Force a send of an RTCP packet.
   // Normal SR and RR are triggered via the process function.
   int32_t SendRTCP(RTCPPacketType rtcpPacketType) override;
-
-  int32_t SendCompoundRTCP(
-      const std::set<RTCPPacketType>& rtcpPacketTypes) override;
 
   // Statistics of the amount of data sent and received.
   int32_t DataCountersRTP(size_t* bytes_sent,
@@ -276,6 +274,7 @@ class ModuleRtpRtcpImpl : public RtpRtcp, public RTCPReceiver::ModuleRtpRtcp {
       StreamDataCountersCallback* callback) override;
   StreamDataCountersCallback* GetSendChannelRtpStatisticsCallback()
       const override;
+  AcknowledgedPacketsObserver* GetAcknowledgedPacketsObserver() const override;
 
   void OnReceivedNack(
       const std::vector<uint16_t>& nack_sequence_numbers) override;

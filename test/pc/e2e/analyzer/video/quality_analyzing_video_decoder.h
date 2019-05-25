@@ -63,7 +63,6 @@ class QualityAnalyzingVideoDecoder : public VideoDecoder {
                      int32_t number_of_cores) override;
   int32_t Decode(const EncodedImage& input_image,
                  bool missing_frames,
-                 const CodecSpecificInfo* codec_specific_info,
                  int64_t render_time_ms) override;
   int32_t RegisterDecodeCompleteCallback(
       DecodedImageCallback* callback) override;
@@ -85,8 +84,6 @@ class QualityAnalyzingVideoDecoder : public VideoDecoder {
     void Decoded(VideoFrame& decodedImage,
                  absl::optional<int32_t> decode_time_ms,
                  absl::optional<uint8_t> qp) override;
-    int32_t ReceivedDecodedReferenceFrame(uint64_t pictureId) override;
-    int32_t ReceivedDecodedFrame(uint64_t pictureId) override;
 
     int32_t IrrelevantSimulcastStreamDecoded(uint16_t frame_id,
                                              int64_t timestamp_ms);

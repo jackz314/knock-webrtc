@@ -104,8 +104,7 @@ class MediaCodecVideoEncoder : public VideoEncoder {
   int32_t RegisterEncodeCompleteCallback(
       EncodedImageCallback* callback) override;
   int32_t Release() override;
-  int32_t SetRateAllocation(const VideoBitrateAllocation& rate_allocation,
-                            uint32_t frame_rate) override;
+  void SetRates(const RateControlParameters& parameters) override;
   EncoderInfo GetEncoderInfo() const override;
 
   // Fills the input buffer with data from the buffers passed as parameters.
@@ -900,17 +899,16 @@ int32_t MediaCodecVideoEncoder::Release() {
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
-int32_t MediaCodecVideoEncoder::SetRateAllocation(
-    const VideoBitrateAllocation& rate_allocation,
-    uint32_t frame_rate) {
+void MediaCodecVideoEncoder::SetRates(const RateControlParameters& parameters) {
   RTC_DCHECK_RUN_ON(&encoder_queue_checker_);
-  const uint32_t new_bit_rate = rate_allocation.get_sum_kbps();
+  const uint32_t new_bit_rate = parameters.bitrate.get_sum_kbps();
   if (sw_fallback_required_)
-    return WEBRTC_VIDEO_CODEC_OK;
+    return;
+  uint32_t frame_rate = static_cast<uint32_t>(parameters.framerate_fps + 0.5);
   frame_rate =
       (frame_rate < MAX_ALLOWED_VIDEO_FPS) ? frame_rate : MAX_ALLOWED_VIDEO_FPS;
   if (last_set_bitrate_kbps_ == new_bit_rate && last_set_fps_ == frame_rate) {
-    return WEBRTC_VIDEO_CODEC_OK;
+    return;
   }
   JNIEnv* jni = AttachCurrentThreadIfNeeded();
   ScopedLocalRefFrame local_ref_frame(jni);
@@ -926,10 +924,7 @@ int32_t MediaCodecVideoEncoder::SetRateAllocation(
       rtc::dchecked_cast<int>(last_set_fps_));
   if (CheckException(jni) || !ret) {
     ProcessHWError(true /* reset_if_fallback_unavailable */);
-    return sw_fallback_required_ ? WEBRTC_VIDEO_CODEC_OK
-                                 : WEBRTC_VIDEO_CODEC_ERROR;
   }
-  return WEBRTC_VIDEO_CODEC_OK;
 }
 
 VideoEncoder::EncoderInfo MediaCodecVideoEncoder::GetEncoderInfo() const {
@@ -1049,8 +1044,6 @@ bool MediaCodecVideoEncoder::DeliverPendingOutputs(JNIEnv* jni) {
         header.VerifyAndAllocateFragmentationHeader(1);
         header.fragmentationOffset[0] = 0;
         header.fragmentationLength[0] = image->size();
-        header.fragmentationPlType[0] = 0;
-        header.fragmentationTimeDiff[0] = 0;
         if (codec_type == kVideoCodecVP8) {
           int qp;
           if (vp8::GetQp(payload, payload_size, &qp)) {
@@ -1086,8 +1079,6 @@ bool MediaCodecVideoEncoder::DeliverPendingOutputs(JNIEnv* jni) {
         for (size_t i = 0; i < nalu_idxs.size(); i++) {
           header.fragmentationOffset[i] = nalu_idxs[i].payload_start_offset;
           header.fragmentationLength[i] = nalu_idxs[i].payload_size;
-          header.fragmentationPlType[i] = 0;
-          header.fragmentationTimeDiff[i] = 0;
         }
       }
 

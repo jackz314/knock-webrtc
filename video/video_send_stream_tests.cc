@@ -27,7 +27,6 @@
 #include "modules/rtp_rtcp/source/rtp_format_vp9.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
 #include "modules/video_coding/codecs/vp9/include/vp9.h"
-#include "rtc_base/bind.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/critical_section.h"
 #include "rtc_base/event.h"
@@ -2045,11 +2044,11 @@ TEST_F(VideoSendStreamTest, CanReconfigureToUseStartBitrateAbovePreviousMax) {
       return FakeEncoder::InitEncode(config, number_of_cores, max_payload_size);
     }
 
-    int32_t SetRates(uint32_t new_target_bitrate, uint32_t framerate) override {
+    void SetRates(const RateControlParameters& parameters) override {
       rtc::CritScope lock(&crit_);
-      start_bitrate_kbps_ = new_target_bitrate;
+      start_bitrate_kbps_ = parameters.bitrate.get_sum_kbps();
       start_bitrate_changed_.Set();
-      return FakeEncoder::SetRates(new_target_bitrate, framerate);
+      FakeEncoder::SetRates(parameters);
     }
 
     int GetStartBitrateKbps() const {
@@ -2118,12 +2117,11 @@ class StartStopBitrateObserver : public test::FakeEncoder {
     return FakeEncoder::InitEncode(config, number_of_cores, max_payload_size);
   }
 
-  int32_t SetRateAllocation(const VideoBitrateAllocation& bitrate,
-                            uint32_t framerate) override {
+  void SetRates(const RateControlParameters& parameters) override {
     rtc::CritScope lock(&crit_);
-    bitrate_kbps_ = bitrate.get_sum_kbps();
+    bitrate_kbps_ = parameters.bitrate.get_sum_kbps();
     bitrate_changed_.Set();
-    return FakeEncoder::SetRateAllocation(bitrate, framerate);
+    FakeEncoder::SetRates(parameters);
   }
 
   bool WaitForEncoderInit() {
@@ -2347,9 +2345,8 @@ TEST_F(VideoSendStreamTest, EncoderIsProperlyInitializedAndDestroyed) {
       return 0;
     }
 
-    int32_t SetRates(uint32_t newBitRate, uint32_t frameRate) override {
+    void SetRates(const RateControlParameters& parameters) override {
       EXPECT_TRUE(IsReadyForEncode());
-      return 0;
     }
 
     void OnVideoStreamsCreated(
@@ -2854,17 +2851,17 @@ TEST_F(VideoSendStreamTest, ReconfigureBitratesSetsEncoderBitratesCorrectly) {
                                      maxPayloadSize);
     }
 
-    int32_t SetRateAllocation(const VideoBitrateAllocation& bitrate,
-                              uint32_t frameRate) override {
+    void SetRates(const RateControlParameters& parameters) override {
       {
         rtc::CritScope lock(&crit_);
-        if (target_bitrate_ == bitrate.get_sum_kbps()) {
-          return FakeEncoder::SetRateAllocation(bitrate, frameRate);
+        if (target_bitrate_ == parameters.bitrate.get_sum_kbps()) {
+          FakeEncoder::SetRates(parameters);
+          return;
         }
-        target_bitrate_ = bitrate.get_sum_kbps();
+        target_bitrate_ = parameters.bitrate.get_sum_kbps();
       }
       bitrate_changed_event_.Set();
-      return FakeEncoder::SetRateAllocation(bitrate, frameRate);
+      FakeEncoder::SetRates(parameters);
     }
 
     void WaitForSetRates(uint32_t expected_bitrate) {
@@ -2892,26 +2889,6 @@ TEST_F(VideoSendStreamTest, ReconfigureBitratesSetsEncoderBitratesCorrectly) {
       bitrate_config->max_bitrate_bps = kMaxBitrateKbps * 1000;
     }
 
-    class VideoStreamFactory
-        : public VideoEncoderConfig::VideoStreamFactoryInterface {
-     public:
-      explicit VideoStreamFactory(int min_bitrate_bps)
-          : min_bitrate_bps_(min_bitrate_bps) {}
-
-     private:
-      std::vector<VideoStream> CreateEncoderStreams(
-          int width,
-          int height,
-          const VideoEncoderConfig& encoder_config) override {
-        std::vector<VideoStream> streams =
-            test::CreateVideoStreams(width, height, encoder_config);
-        streams[0].min_bitrate_bps = min_bitrate_bps_;
-        return streams;
-      }
-
-      const int min_bitrate_bps_;
-    };
-
     void ModifyVideoConfigs(
         VideoSendStream::Config* send_config,
         std::vector<VideoReceiveStream::Config>* receive_configs,
@@ -2920,10 +2897,9 @@ TEST_F(VideoSendStreamTest, ReconfigureBitratesSetsEncoderBitratesCorrectly) {
       // Set bitrates lower/higher than min/max to make sure they are properly
       // capped.
       encoder_config->max_bitrate_bps = kMaxBitrateKbps * 1000;
-      // Create a new StreamFactory to be able to set
-      // |VideoStream.min_bitrate_bps|.
-      encoder_config->video_stream_factory =
-          new rtc::RefCountedObject<VideoStreamFactory>(kMinBitrateKbps * 1000);
+      EXPECT_EQ(1u, encoder_config->simulcast_layers.size());
+      encoder_config->simulcast_layers[0].min_bitrate_bps =
+          kMinBitrateKbps * 1000;
       encoder_config_ = encoder_config->Copy();
     }
 
@@ -3653,16 +3629,15 @@ TEST_F(VideoSendStreamTest, RemoveOverheadFromBandwidth) {
           max_bitrate_bps_(0),
           first_packet_sent_(false) {}
 
-    int32_t SetRateAllocation(const VideoBitrateAllocation& bitrate,
-                              uint32_t frameRate) override {
+    void SetRates(const RateControlParameters& parameters) override {
       rtc::CritScope lock(&crit_);
       // Wait for the first sent packet so that videosendstream knows
       // rtp_overhead.
       if (first_packet_sent_) {
-        max_bitrate_bps_ = bitrate.get_sum_bps();
+        max_bitrate_bps_ = parameters.bitrate.get_sum_bps();
         bitrate_changed_event_.Set();
       }
-      return FakeEncoder::SetRateAllocation(bitrate, frameRate);
+      return FakeEncoder::SetRates(parameters);
     }
 
     void OnCallsCreated(Call* sender_call, Call* receiver_call) override {

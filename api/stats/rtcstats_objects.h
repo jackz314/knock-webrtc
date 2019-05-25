@@ -279,6 +279,7 @@ class RTC_EXPORT RTCMediaStreamTrackStats final : public RTCStats {
   ~RTCMediaStreamTrackStats() override;
 
   RTCStatsMember<std::string> track_identifier;
+  RTCStatsMember<std::string> media_source_id;
   RTCStatsMember<bool> remote_source;
   RTCStatsMember<bool> ended;
   // TODO(hbos): |RTCStatsCollector| does not return stats for detached tracks.
@@ -315,12 +316,19 @@ class RTC_EXPORT RTCMediaStreamTrackStats final : public RTCStats {
   RTCStatsMember<uint64_t> total_samples_received;
   RTCStatsMember<double> total_samples_duration;
   RTCStatsMember<uint64_t> concealed_samples;
+  RTCStatsMember<uint64_t> silent_concealed_samples;
   RTCStatsMember<uint64_t> concealment_events;
+  RTCStatsMember<uint64_t> inserted_samples_for_deceleration;
+  RTCStatsMember<uint64_t> removed_samples_for_acceleration;
   // Non-standard audio-only member
   // TODO(kuddai): Add description to standard. crbug.com/webrtc/10042
   RTCNonStandardStatsMember<uint64_t> jitter_buffer_flushes;
   RTCNonStandardStatsMember<uint64_t> delayed_packet_outage_samples;
   RTCNonStandardStatsMember<double> relative_packet_arrival_delay;
+  // TODO(henrik.lundin): Add description of the interruption metrics at
+  // https://github.com/henbos/webrtc-provisional-stats/issues/17
+  RTCNonStandardStatsMember<uint32_t> interruption_count;
+  RTCNonStandardStatsMember<double> total_interruption_duration;
   // Non-standard video-only members.
   // https://henbos.github.io/webrtc-provisional-stats/#RTCVideoReceiverStats-dict*
   RTCNonStandardStatsMember<uint32_t> freeze_count;
@@ -395,8 +403,11 @@ class RTC_EXPORT RTCInboundRTPStreamStats final : public RTCRTPStreamStats {
   ~RTCInboundRTPStreamStats() override;
 
   RTCStatsMember<uint32_t> packets_received;
+  RTCStatsMember<uint64_t> fec_packets_received;
+  RTCStatsMember<uint64_t> fec_packets_discarded;
   RTCStatsMember<uint64_t> bytes_received;
   RTCStatsMember<int32_t> packets_lost;  // Signed per RFC 3550
+  RTCStatsMember<double> last_packet_received_timestamp;
   // TODO(hbos): Collect and populate this value for both "audio" and "video",
   // currently not collected for "video". https://bugs.webrtc.org/7065
   RTCStatsMember<double> jitter;
@@ -440,14 +451,65 @@ class RTC_EXPORT RTCOutboundRTPStreamStats final : public RTCRTPStreamStats {
   RTCOutboundRTPStreamStats(const RTCOutboundRTPStreamStats& other);
   ~RTCOutboundRTPStreamStats() override;
 
+  RTCStatsMember<std::string> media_source_id;
   RTCStatsMember<uint32_t> packets_sent;
+  RTCStatsMember<uint64_t> retransmitted_packets_sent;
   RTCStatsMember<uint64_t> bytes_sent;
+  RTCStatsMember<uint64_t> retransmitted_bytes_sent;
   // TODO(hbos): Collect and populate this value. https://bugs.webrtc.org/7066
   RTCStatsMember<double> target_bitrate;
   RTCStatsMember<uint32_t> frames_encoded;
   RTCStatsMember<double> total_encode_time;
+  RTCStatsMember<uint64_t> total_encoded_bytes_target;
+  // TODO(https://crbug.com/webrtc/10635): This is only implemented for video;
+  // implement it for audio as well.
+  RTCStatsMember<double> total_packet_send_delay;
   // https://henbos.github.io/webrtc-provisional-stats/#dom-rtcoutboundrtpstreamstats-contenttype
   RTCStatsMember<std::string> content_type;
+};
+
+// https://w3c.github.io/webrtc-stats/#dom-rtcmediasourcestats
+class RTC_EXPORT RTCMediaSourceStats : public RTCStats {
+ public:
+  WEBRTC_RTCSTATS_DECL();
+
+  RTCMediaSourceStats(const RTCMediaSourceStats& other);
+  ~RTCMediaSourceStats() override;
+
+  RTCStatsMember<std::string> track_identifier;
+  RTCStatsMember<std::string> kind;
+
+ protected:
+  RTCMediaSourceStats(const std::string& id, int64_t timestamp_us);
+  RTCMediaSourceStats(std::string&& id, int64_t timestamp_us);
+};
+
+// https://w3c.github.io/webrtc-stats/#dom-rtcaudiosourcestats
+class RTC_EXPORT RTCAudioSourceStats final : public RTCMediaSourceStats {
+ public:
+  WEBRTC_RTCSTATS_DECL();
+
+  RTCAudioSourceStats(const std::string& id, int64_t timestamp_us);
+  RTCAudioSourceStats(std::string&& id, int64_t timestamp_us);
+  RTCAudioSourceStats(const RTCAudioSourceStats& other);
+  ~RTCAudioSourceStats() override;
+};
+
+// https://w3c.github.io/webrtc-stats/#dom-rtcvideosourcestats
+class RTC_EXPORT RTCVideoSourceStats final : public RTCMediaSourceStats {
+ public:
+  WEBRTC_RTCSTATS_DECL();
+
+  RTCVideoSourceStats(const std::string& id, int64_t timestamp_us);
+  RTCVideoSourceStats(std::string&& id, int64_t timestamp_us);
+  RTCVideoSourceStats(const RTCVideoSourceStats& other);
+  ~RTCVideoSourceStats() override;
+
+  RTCStatsMember<uint32_t> width;
+  RTCStatsMember<uint32_t> height;
+  // TODO(hbos): Implement this metric.
+  RTCStatsMember<uint32_t> frames;
+  RTCStatsMember<uint32_t> frames_per_second;
 };
 
 // https://w3c.github.io/webrtc-stats/#transportstats-dict*

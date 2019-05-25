@@ -91,6 +91,8 @@ extern const int kPreferredSPropStereo;
 extern const int kPreferredStereo;
 extern const int kPreferredUseInbandFec;
 
+// rtcp-fb message in its first experimental stages. Documentation pending.
+extern const char kRtcpFbParamLntf[];
 // rtcp-fb messages according to RFC 4585
 extern const char kRtcpFbParamNack[];
 extern const char kRtcpFbNackParamPli[];
@@ -112,6 +114,7 @@ extern const char kCodecParamMinBitrate[];
 extern const char kCodecParamStartBitrate[];
 extern const char kCodecParamMaxQuantization[];
 extern const char kCodecParamPort[];
+extern const char kCodecParamMaxMessageSize[];
 
 // We put the data codec names here so callers of DataEngine::CreateChannel
 // don't have to import rtpdataengine.h to get the codec names they want to

@@ -523,6 +523,8 @@ class FakeVoiceEngine : public VoiceEngineInterface {
   const std::vector<AudioCodec>& send_codecs() const override;
   const std::vector<AudioCodec>& recv_codecs() const override;
   void SetCodecs(const std::vector<AudioCodec>& codecs);
+  void SetRecvCodecs(const std::vector<AudioCodec>& codecs);
+  void SetSendCodecs(const std::vector<AudioCodec>& codecs);
   int GetInputLevel();
   bool StartAecDump(rtc::PlatformFile file, int64_t max_size_bytes) override;
   void StopAecDump() override;
@@ -531,7 +533,8 @@ class FakeVoiceEngine : public VoiceEngineInterface {
 
  private:
   std::vector<FakeVoiceMediaChannel*> channels_;
-  std::vector<AudioCodec> codecs_;
+  std::vector<AudioCodec> recv_codecs_;
+  std::vector<AudioCodec> send_codecs_;
   bool fail_create_channel_;
 
   friend class FakeMediaEngine;
@@ -546,7 +549,9 @@ class FakeVideoEngine : public VideoEngineInterface {
       webrtc::Call* call,
       const MediaConfig& config,
       const VideoOptions& options,
-      const webrtc::CryptoOptions& crypto_options) override;
+      const webrtc::CryptoOptions& crypto_options,
+      webrtc::VideoBitrateAllocatorFactory* video_bitrate_allocator_factory)
+      override;
   FakeVideoMediaChannel* GetChannel(size_t index);
   void UnregisterChannel(VideoMediaChannel* channel);
   std::vector<VideoCodec> codecs() const override;
@@ -570,6 +575,8 @@ class FakeMediaEngine : public CompositeMediaEngine {
   ~FakeMediaEngine() override;
 
   void SetAudioCodecs(const std::vector<AudioCodec>& codecs);
+  void SetAudioRecvCodecs(const std::vector<AudioCodec>& codecs);
+  void SetAudioSendCodecs(const std::vector<AudioCodec>& codecs);
   void SetVideoCodecs(const std::vector<VideoCodec>& codecs);
 
   FakeVoiceMediaChannel* GetVoiceChannel(size_t index);

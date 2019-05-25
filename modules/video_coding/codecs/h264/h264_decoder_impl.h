@@ -12,6 +12,15 @@
 #ifndef MODULES_VIDEO_CODING_CODECS_H264_H264_DECODER_IMPL_H_
 #define MODULES_VIDEO_CODING_CODECS_H264_H264_DECODER_IMPL_H_
 
+// Everything declared in this header is only required when WebRTC is
+// build with H264 support, please do not move anything out of the
+// #ifdef unless needed and tested.
+#ifdef WEBRTC_USE_H264
+
+#if defined(WEBRTC_WIN) && !defined(__clang__)
+#error "See: bugs.webrtc.org/9213#c13."
+#endif
+
 #include <memory>
 
 #include "modules/video_coding/codecs/h264/include/h264.h"
@@ -63,12 +72,12 @@ class H264DecoderImpl : public H264Decoder {
   // |missing_frames|, |fragmentation| and |render_time_ms| are ignored.
   int32_t Decode(const EncodedImage& input_image,
                  bool /*missing_frames*/,
-                 const CodecSpecificInfo* codec_specific_info = nullptr,
                  int64_t render_time_ms = -1) override;
 
   const char* ImplementationName() const override;
 
  private:
+  const bool kEnable8bitHdrFix_;
   // Called by FFmpeg when it needs a frame buffer to store decoded frames in.
   // The |VideoFrame| returned by FFmpeg at |Decode| originate from here. Their
   // buffers are reference counted and freed by FFmpeg using |AVFreeBuffer2|.
@@ -97,5 +106,7 @@ class H264DecoderImpl : public H264Decoder {
 };
 
 }  // namespace webrtc
+
+#endif  // WEBRTC_USE_H264
 
 #endif  // MODULES_VIDEO_CODING_CODECS_H264_H264_DECODER_IMPL_H_
