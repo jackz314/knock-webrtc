@@ -30,7 +30,7 @@ script:
   - chmod u+x tools_webrtc/android/build_aar.py
   - ./tools_webrtc/android/build_aar.py
   - chmod u+x publish-maven.sh
-  - ./publish-maven.sh #publish to maven repo
+  - [ $? -eq 0 ] && ./publish-maven.sh || echo "aborting publish to maven since build failed" #publish to maven repo
 before_deploy:
   # Set up git user name and tag this commit
   - git config --local user.name "Jack Zhang"
