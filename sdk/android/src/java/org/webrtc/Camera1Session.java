@@ -163,7 +163,7 @@ class Camera1Session implements CameraSession {
       long constructionTimeNs) {
     Logging.d(TAG, "Create new camera1 session on camera " + cameraId);
 
-    this.cameraThreadHandler = new Handler();
+    this.cameraThreadHandler = surfaceTextureHelper.getHandler();//set camera thread handler to a publicaly available one
     this.events = events;
     this.captureToTexture = captureToTexture;
     this.applicationContext = applicationContext;
@@ -227,6 +227,8 @@ class Camera1Session implements CameraSession {
       stopInternal();
       events.onCameraError(this, e.getMessage());
     }
+    //camera finally finished initilizing and started running, pass back camera instance
+    events.onCameraControlReady(camera, null, null, null);
   }
 
   private void stopInternal() {

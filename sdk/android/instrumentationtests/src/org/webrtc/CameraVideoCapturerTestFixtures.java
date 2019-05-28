@@ -30,6 +30,10 @@ import org.junit.runner.RunWith;
 import org.webrtc.CameraEnumerationAndroid.CaptureFormat;
 import org.webrtc.VideoFrame;
 
+import android.hardware.camera2.CameraCaptureSession;
+import android.hardware.camera2.CameraDevice;
+import android.hardware.camera2.CaptureRequest;
+
 class CameraVideoCapturerTestFixtures {
   static final String TAG = "CameraVideoCapturerTestFixtures";
   // Default values used for starting capturing
@@ -197,6 +201,11 @@ class CameraVideoCapturerTestFixtures {
     private final Object cameraClosedLock = new Object();
     private boolean cameraClosed = true;
 
+    @Override
+    public void onCameraControlReady(android.hardware.Camera camera1Instance, CameraCaptureSession cameraCaptureSession, CameraDevice cameraDevice, CaptureRequest.Builder captureRequestBuilder){
+      Logging.d(TAG, "onCameraControlReady, is " + (cameraCaptureSession == null ? "not " : "") + "using camera2 API");
+    }
+    
     @Override
     public void onCameraError(String errorDescription) {
       Logging.w(TAG, "Camera error: " + errorDescription);
