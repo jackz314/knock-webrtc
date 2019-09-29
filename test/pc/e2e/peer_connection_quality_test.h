@@ -15,7 +15,6 @@
 #include <string>
 #include <vector>
 
-#include "absl/memory/memory.h"
 #include "api/task_queue/task_queue_factory.h"
 #include "api/test/audio_quality_analyzer_interface.h"
 #include "api/test/peerconnection_quality_test_fixture.h"
@@ -32,6 +31,7 @@
 #include "test/pc/e2e/analyzer/video/video_quality_analyzer_injection_helper.h"
 #include "test/pc/e2e/analyzer_helper.h"
 #include "test/pc/e2e/peer_connection_quality_test_params.h"
+#include "test/pc/e2e/sdp/sdp_changer.h"
 #include "test/pc/e2e/test_peer.h"
 #include "test/testsupport/video_frame_writer.h"
 
@@ -43,10 +43,16 @@ class PeerConfigurerImpl final
  public:
   PeerConfigurerImpl(rtc::Thread* network_thread,
                      rtc::NetworkManager* network_manager)
-      : components_(absl::make_unique<InjectableComponents>(network_thread,
-                                                            network_manager)),
-        params_(absl::make_unique<Params>()) {}
+      : components_(std::make_unique<InjectableComponents>(network_thread,
+                                                           network_manager)),
+        params_(std::make_unique<Params>()) {}
 
+  PeerConfigurer* SetTaskQueueFactory(
+      std::unique_ptr<TaskQueueFactory> task_queue_factory) override {
+    components_->pcf_dependencies->task_queue_factory =
+        std::move(task_queue_factory);
+    return this;
+  }
   PeerConfigurer* SetCallFactory(
       std::unique_ptr<CallFactoryInterface> call_factory) override {
     components_->pcf_dependencies->call_factory = std::move(call_factory);
@@ -134,6 +140,11 @@ class PeerConfigurerImpl final
     params_->rtc_configuration = std::move(configuration);
     return this;
   }
+  PeerConfigurer* SetBitrateParameters(
+      PeerConnectionInterface::BitrateParameters bitrate_params) override {
+    params_->bitrate_params = bitrate_params;
+    return this;
+  }
 
  protected:
   friend class PeerConnectionE2EQualityTest;
@@ -155,6 +166,8 @@ class PeerConnectionE2EQualityTest
       PeerConnectionE2EQualityTestFixture::VideoGeneratorType;
   using RunParams = PeerConnectionE2EQualityTestFixture::RunParams;
   using VideoConfig = PeerConnectionE2EQualityTestFixture::VideoConfig;
+  using VideoSimulcastConfig =
+      PeerConnectionE2EQualityTestFixture::VideoSimulcastConfig;
   using PeerConfigurer = PeerConnectionE2EQualityTestFixture::PeerConfigurer;
   using QualityMetricsReporter =
       PeerConnectionE2EQualityTestFixture::QualityMetricsReporter;
@@ -227,7 +240,9 @@ class PeerConnectionE2EQualityTest
       const VideoConfig& video_config);
   void MaybeAddAudio(TestPeer* peer);
   void SetPeerCodecPreferences(TestPeer* peer, const RunParams& run_params);
-  void SetupCall();
+  void SetupCall(const RunParams& run_params);
+  void ExchangeOfferAnswer(SignalingInterceptor* signaling_interceptor);
+  void ExchangeIceCandidates(SignalingInterceptor* signaling_interceptor);
   void StartVideo(
       const std::vector<
           rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>& sources);

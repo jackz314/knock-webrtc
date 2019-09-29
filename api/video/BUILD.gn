@@ -8,31 +8,45 @@
 
 import("../../webrtc.gni")
 
-rtc_source_set("video_frame") {
+rtc_source_set("video_rtp_headers") {
   visibility = [ "*" ]
   sources = [
     "color_space.cc",
     "color_space.h",
     "hdr_metadata.cc",
     "hdr_metadata.h",
-    "video_codec_type.h",
     "video_content_type.cc",
     "video_content_type.h",
-    "video_frame.cc",
-    "video_frame.h",
-    "video_frame_buffer.cc",
-    "video_frame_buffer.h",
     "video_frame_marking.h",
     "video_rotation.h",
-    "video_sink_interface.h",
-    "video_source_interface.cc",
-    "video_source_interface.h",
     "video_timing.cc",
     "video_timing.h",
   ]
 
   deps = [
     "..:array_view",
+    "../../rtc_base:rtc_base_approved",
+    "//third_party/abseil-cpp/absl/types:optional",
+  ]
+}
+
+rtc_source_set("video_frame") {
+  visibility = [ "*" ]
+  sources = [
+    "video_codec_type.h",
+    "video_frame.cc",
+    "video_frame.h",
+    "video_frame_buffer.cc",
+    "video_frame_buffer.h",
+    "video_sink_interface.h",
+    "video_source_interface.cc",
+    "video_source_interface.h",
+  ]
+
+  deps = [
+    ":video_rtp_headers",
+    "..:array_view",
+    "..:rtp_packet_info",
     "..:scoped_refptr",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
@@ -56,6 +70,7 @@ rtc_source_set("video_frame_i420") {
   ]
   deps = [
     ":video_frame",
+    ":video_rtp_headers",
     "..:scoped_refptr",
     "../../rtc_base",
     "../../rtc_base:checks",
@@ -74,6 +89,7 @@ rtc_source_set("video_frame_i010") {
   deps = [
     ":video_frame",
     ":video_frame_i420",
+    ":video_rtp_headers",
     "..:scoped_refptr",
     "../../rtc_base",
     "../../rtc_base:checks",
@@ -83,6 +99,7 @@ rtc_source_set("video_frame_i010") {
 }
 
 rtc_source_set("encoded_image") {
+  visibility = [ "*" ]
   sources = [
     "encoded_image.cc",
     "encoded_image.h",
@@ -91,6 +108,10 @@ rtc_source_set("encoded_image") {
     ":video_codec_constants",
     ":video_frame",
     ":video_frame_type",
+    ":video_rtp_headers",
+    "..:refcountedbase",
+    "..:rtp_packet_info",
+    "..:scoped_refptr",
     "../..:webrtc_common",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
@@ -138,10 +159,12 @@ rtc_source_set("video_bitrate_allocation") {
 rtc_source_set("video_bitrate_allocator") {
   visibility = [ "*" ]
   sources = [
+    "video_bitrate_allocator.cc",
     "video_bitrate_allocator.h",
   ]
   deps = [
     ":video_bitrate_allocation",
+    "../units:data_rate",
   ]
 }
 
@@ -167,6 +190,7 @@ rtc_source_set("video_stream_decoder") {
     ":encoded_frame",
     ":video_frame",
     "../task_queue",
+    "../units:time_delta",
     "../video_codecs:video_codecs_api",
     "//third_party/abseil-cpp/absl/types:optional",
   ]
@@ -185,7 +209,6 @@ rtc_source_set("video_stream_decoder_create") {
     "../../video:video_stream_decoder_impl",
     "../task_queue",
     "../video_codecs:video_codecs_api",
-    "//third_party/abseil-cpp/absl/memory",
   ]
 }
 
@@ -199,13 +222,15 @@ rtc_source_set("video_stream_encoder") {
   ]
 
   deps = [
+    ":video_bitrate_allocation",
     ":video_bitrate_allocator",
     ":video_bitrate_allocator_factory",
+    ":video_codec_constants",
     ":video_frame",
+    "..:rtp_parameters",
+    "../:fec_controller_api",
+    "../:rtp_parameters",
     "../units:data_rate",
-
-    # For rtpparameters.h
-    "..:libjingle_peerconnection_api",
     "../video_codecs:video_codecs_api",
     "//third_party/abseil-cpp/absl/types:optional",
   ]
@@ -225,7 +250,6 @@ rtc_source_set("video_stream_encoder_create") {
     "../../video:video_stream_encoder_impl",
     "../task_queue",
     "../video_codecs:video_codecs_api",
-    "//third_party/abseil-cpp/absl/memory",
   ]
 }
 
@@ -247,7 +271,6 @@ rtc_static_library("builtin_video_bitrate_allocator_factory") {
     "../../modules/video_coding:webrtc_vp9_helpers",
     "../../rtc_base/system:fallthrough",
     "../video_codecs:video_codecs_api",
-    "//third_party/abseil-cpp/absl/memory",
   ]
 }
 

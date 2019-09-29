@@ -13,6 +13,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+
 #include <deque>
 #include <memory>
 #include <queue>
@@ -90,7 +91,6 @@ class RtpPacketizerH264 : public RtpPacketizer {
   void NextFragmentPacket(RtpPacketToSend* rtp_packet);
 
   const PayloadSizeLimits limits_;
-  std::unique_ptr<rtc::Buffer> modified_buffer_;
   size_t num_packets_left_;
   std::deque<Fragment> input_fragments_;
   std::queue<PacketUnit> packets_;

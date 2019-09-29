@@ -17,18 +17,16 @@
 #include <vector>
 
 #include "api/audio_codecs/audio_encoder_factory.h"
-#include "api/rtp_receiver_interface.h"
 #include "api/scoped_refptr.h"
 #include "api/task_queue/task_queue_factory.h"
+#include "api/transport/rtp/rtp_source.h"
 #include "call/audio_state.h"
 #include "call/call.h"
+#include "media/base/media_engine.h"
 #include "media/base/rtp_utils.h"
 #include "media/engine/apm_helpers.h"
-#include "modules/audio_processing/include/audio_processing.h"
-#include "pc/channel.h"
 #include "rtc_base/buffer.h"
 #include "rtc_base/constructor_magic.h"
-#include "rtc_base/experiments/audio_allocation_settings.h"
 #include "rtc_base/network_route.h"
 #include "rtc_base/task_queue.h"
 #include "rtc_base/thread_checker.h"
@@ -79,7 +77,7 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
   // specified. When the maximum file size is reached, logging is stopped and
   // the file is closed. If max_size_bytes is set to <= 0, no limit will be
   // used.
-  bool StartAecDump(rtc::PlatformFile file, int64_t max_size_bytes) override;
+  bool StartAecDump(webrtc::FileWrapper file, int64_t max_size_bytes) override;
 
   // Stops AEC dump.
   void StopAecDump() override;
@@ -99,13 +97,11 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
   webrtc::AudioProcessing* apm() const;
   webrtc::AudioState* audio_state();
 
-  AudioCodecs CollectCodecs(
+  std::vector<AudioCodec> CollectCodecs(
       const std::vector<webrtc::AudioCodecSpec>& specs) const;
 
   rtc::ThreadChecker signal_thread_checker_;
   rtc::ThreadChecker worker_thread_checker_;
-
-  const webrtc::AudioAllocationSettings allocation_settings_;
 
   // The audio device module.
   rtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
@@ -122,12 +118,9 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
   bool is_dumping_aec_ = false;
   bool initialized_ = false;
 
-  // Cache received extended_filter_aec, delay_agnostic_aec and experimental_ns
-  // values, and apply them in case they are missing in the audio options.
-  // We need to do this because SetExtraOptions() will revert to defaults for
-  // options which are not provided.
-  absl::optional<bool> extended_filter_aec_;
-  absl::optional<bool> delay_agnostic_aec_;
+  // Cache experimental_ns and apply in case they are missing in the audio
+  // options. We need to do this because SetExtraOptions() will revert to
+  // defaults for options which are not provided.
   absl::optional<bool> experimental_ns_;
   // Jitter buffer settings for new streams.
   size_t audio_jitter_buffer_max_packets_ = 200;
@@ -200,8 +193,6 @@ class WebRtcVoiceMediaChannel final : public VoiceMediaChannel,
 
   void OnPacketReceived(rtc::CopyOnWriteBuffer packet,
                         int64_t packet_time_us) override;
-  void OnRtcpReceived(rtc::CopyOnWriteBuffer packet,
-                      int64_t packet_time_us) override;
   void OnNetworkRouteChanged(const std::string& transport_name,
                              const rtc::NetworkRoute& network_route) override;
   void OnReadyToSend(bool ready) override;

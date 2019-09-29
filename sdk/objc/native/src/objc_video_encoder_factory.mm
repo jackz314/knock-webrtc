@@ -41,12 +41,11 @@ class ObjCVideoEncoder : public VideoEncoder {
   ObjCVideoEncoder(id<RTCVideoEncoder> encoder)
       : encoder_(encoder), implementation_name_([encoder implementationName].stdString) {}
 
-  int32_t InitEncode(const VideoCodec *codec_settings,
-                     int32_t number_of_cores,
-                     size_t max_payload_size) override {
+  int32_t InitEncode(const VideoCodec *codec_settings, const Settings &encoder_settings) override {
     RTCVideoEncoderSettings *settings =
         [[RTCVideoEncoderSettings alloc] initWithNativeVideoCodec:codec_settings];
-    return [encoder_ startEncodeWithSettings:settings numberOfCores:number_of_cores];
+    return [encoder_ startEncodeWithSettings:settings
+                               numberOfCores:encoder_settings.number_of_cores];
   }
 
   int32_t RegisterEncodeCompleteCallback(EncodedImageCallback *callback) override {
@@ -122,12 +121,24 @@ id<RTCVideoEncoderFactory> ObjCVideoEncoderFactory::wrapped_encoder_factory() co
 
 std::vector<SdpVideoFormat> ObjCVideoEncoderFactory::GetSupportedFormats() const {
   std::vector<SdpVideoFormat> supported_formats;
-  for (RTCVideoCodecInfo *supportedCodec in encoder_factory_.supportedCodecs) {
+  for (RTCVideoCodecInfo *supportedCodec in [encoder_factory_ supportedCodecs]) {
     SdpVideoFormat format = [supportedCodec nativeSdpVideoFormat];
     supported_formats.push_back(format);
   }
 
   return supported_formats;
+}
+
+std::vector<SdpVideoFormat> ObjCVideoEncoderFactory::GetImplementations() const {
+  if ([encoder_factory_ respondsToSelector:SEL("implementations")]) {
+    std::vector<SdpVideoFormat> supported_formats;
+    for (RTCVideoCodecInfo *supportedCodec in [encoder_factory_ implementations]) {
+      SdpVideoFormat format = [supportedCodec nativeSdpVideoFormat];
+      supported_formats.push_back(format);
+    }
+    return supported_formats;
+  }
+  return GetSupportedFormats();
 }
 
 VideoEncoderFactory::CodecInfo ObjCVideoEncoderFactory::QueryVideoEncoder(

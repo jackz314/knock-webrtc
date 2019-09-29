@@ -187,7 +187,7 @@ VoiceChannel* ChannelManager::CreateVoiceChannel(
     return nullptr;
   }
 
-  auto voice_channel = absl::make_unique<VoiceChannel>(
+  auto voice_channel = std::make_unique<VoiceChannel>(
       worker_thread_, network_thread_, signaling_thread,
       absl::WrapUnique(media_channel), content_name, srtp_required,
       crypto_options, ssrc_generator);
@@ -259,7 +259,7 @@ VideoChannel* ChannelManager::CreateVideoChannel(
     return nullptr;
   }
 
-  auto video_channel = absl::make_unique<VideoChannel>(
+  auto video_channel = std::make_unique<VideoChannel>(
       worker_thread_, network_thread_, signaling_thread,
       absl::WrapUnique(media_channel), content_name, srtp_required,
       crypto_options, ssrc_generator);
@@ -320,7 +320,7 @@ RtpDataChannel* ChannelManager::CreateRtpDataChannel(
     return nullptr;
   }
 
-  auto data_channel = absl::make_unique<RtpDataChannel>(
+  auto data_channel = std::make_unique<RtpDataChannel>(
       worker_thread_, network_thread_, signaling_thread,
       absl::WrapUnique(media_channel), content_name, srtp_required,
       crypto_options, ssrc_generator);
@@ -358,10 +358,10 @@ void ChannelManager::DestroyRtpDataChannel(RtpDataChannel* data_channel) {
   data_channels_.erase(it);
 }
 
-bool ChannelManager::StartAecDump(rtc::PlatformFile file,
+bool ChannelManager::StartAecDump(webrtc::FileWrapper file,
                                   int64_t max_size_bytes) {
   return worker_thread_->Invoke<bool>(RTC_FROM_HERE, [&] {
-    return media_engine_->voice().StartAecDump(file, max_size_bytes);
+    return media_engine_->voice().StartAecDump(std::move(file), max_size_bytes);
   });
 }
 

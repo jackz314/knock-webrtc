@@ -13,9 +13,11 @@
 #include <map>
 #include <set>
 #include <utility>
+#include <vector>
 
 #include "modules/video_coding/frame_object.h"
 #include "modules/video_coding/packet_buffer.h"
+#include "modules/video_coding/rtp_frame_reference_finder.h"
 #include "rtc_base/random.h"
 #include "rtc_base/ref_count.h"
 #include "system_wrappers/include/clock.h"
@@ -38,15 +40,6 @@ class FakePacketBuffer : public PacketBuffer {
     return true;
   }
 
-  bool GetBitstream(const RtpFrameObject& frame,
-                    uint8_t* destination) override {
-    return true;
-  }
-
-  void ReturnFrame(RtpFrameObject* frame) override {
-    packets_.erase(frame->first_seq_num());
-  }
-
  private:
   std::map<uint16_t, VCMPacket> packets_;
 };
@@ -56,7 +49,6 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
  protected:
   TestRtpFrameReferenceFinder()
       : rand_(0x8739211),
-        ref_packet_buffer_(new FakePacketBuffer()),
         reference_finder_(new RtpFrameReferenceFinder(this)),
         frames_from_callback_(FrameComp()) {}
 
@@ -85,14 +77,15 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
     packet.video_header.frame_type = keyframe
                                          ? VideoFrameType::kVideoFrameKey
                                          : VideoFrameType::kVideoFrameDelta;
-    ref_packet_buffer_->InsertPacket(&packet);
+    packet_buffer_.InsertPacket(&packet);
 
     packet.seqNum = seq_num_end;
     packet.video_header.is_last_packet_in_frame = true;
-    ref_packet_buffer_->InsertPacket(&packet);
+    packet_buffer_.InsertPacket(&packet);
 
-    std::unique_ptr<RtpFrameObject> frame(new RtpFrameObject(
-        ref_packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, 0));
+    auto frame = std::make_unique<RtpFrameObject>(
+        &packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
     reference_finder_->ManageFrame(std::move(frame));
   }
 
@@ -117,16 +110,17 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
     vp8_header.temporalIdx = tid;
     vp8_header.tl0PicIdx = tl0;
     vp8_header.layerSync = sync;
-    ref_packet_buffer_->InsertPacket(&packet);
+    packet_buffer_.InsertPacket(&packet);
 
     if (seq_num_start != seq_num_end) {
       packet.seqNum = seq_num_end;
       packet.video_header.is_last_packet_in_frame = true;
-      ref_packet_buffer_->InsertPacket(&packet);
+      packet_buffer_.InsertPacket(&packet);
     }
 
-    std::unique_ptr<RtpFrameObject> frame(new RtpFrameObject(
-        ref_packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, 0));
+    auto frame = std::make_unique<RtpFrameObject>(
+        &packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
     reference_finder_->ManageFrame(std::move(frame));
   }
 
@@ -162,17 +156,18 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
       vp9_header.ss_data_available = true;
       vp9_header.gof = *ss;
     }
-    ref_packet_buffer_->InsertPacket(&packet);
+    packet_buffer_.InsertPacket(&packet);
 
     if (seq_num_start != seq_num_end) {
       packet.video_header.is_last_packet_in_frame = true;
       vp9_header.ss_data_available = false;
       packet.seqNum = seq_num_end;
-      ref_packet_buffer_->InsertPacket(&packet);
+      packet_buffer_.InsertPacket(&packet);
     }
 
-    std::unique_ptr<RtpFrameObject> frame(new RtpFrameObject(
-        ref_packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, 0));
+    auto frame = std::make_unique<RtpFrameObject>(
+        &packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
     reference_finder_->ManageFrame(std::move(frame));
   }
 
@@ -204,16 +199,17 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
     vp9_header.num_ref_pics = refs.size();
     for (size_t i = 0; i < refs.size(); ++i)
       vp9_header.pid_diff[i] = refs[i];
-    ref_packet_buffer_->InsertPacket(&packet);
+    packet_buffer_.InsertPacket(&packet);
 
     if (seq_num_start != seq_num_end) {
       packet.seqNum = seq_num_end;
       packet.video_header.is_last_packet_in_frame = true;
-      ref_packet_buffer_->InsertPacket(&packet);
+      packet_buffer_.InsertPacket(&packet);
     }
 
-    std::unique_ptr<RtpFrameObject> frame(new RtpFrameObject(
-        ref_packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, 0));
+    auto frame = std::make_unique<RtpFrameObject>(
+        &packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
     reference_finder_->ManageFrame(std::move(frame));
   }
 
@@ -234,16 +230,17 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
     packet.video_header.frame_marking.temporal_id = tid;
     packet.video_header.frame_marking.tl0_pic_idx = tl0;
     packet.video_header.frame_marking.base_layer_sync = sync;
-    ref_packet_buffer_->InsertPacket(&packet);
+    packet_buffer_.InsertPacket(&packet);
 
     if (seq_num_start != seq_num_end) {
       packet.seqNum = seq_num_end;
       packet.video_header.is_last_packet_in_frame = true;
-      ref_packet_buffer_->InsertPacket(&packet);
+      packet_buffer_.InsertPacket(&packet);
     }
 
-    std::unique_ptr<RtpFrameObject> frame(new RtpFrameObject(
-        ref_packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, 0));
+    auto frame = std::make_unique<RtpFrameObject>(
+        &packet_buffer_, seq_num_start, seq_num_end, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
     reference_finder_->ManageFrame(std::move(frame));
   }
 
@@ -301,7 +298,7 @@ class TestRtpFrameReferenceFinder : public ::testing::Test,
   void RefsToSet(std::set<int64_t>* m) const {}
 
   Random rand_;
-  rtc::scoped_refptr<FakePacketBuffer> ref_packet_buffer_;
+  FakePacketBuffer packet_buffer_;
   std::unique_ptr<RtpFrameReferenceFinder> reference_finder_;
   struct FrameComp {
     bool operator()(const std::pair<int64_t, uint8_t> f1,

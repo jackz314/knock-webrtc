@@ -8,20 +8,21 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-#include "absl/memory/memory.h"
+#include <memory>
+
 #include "api/audio_codecs/audio_decoder_factory_template.h"
 #include "api/audio_codecs/audio_encoder_factory_template.h"
 #include "api/audio_codecs/opus/audio_decoder_opus.h"
 #include "api/audio_codecs/opus/audio_encoder_opus.h"
-#include "api/media_transport_config.h"
+#include "api/rtc_event_log/rtc_event_log.h"
 #include "api/task_queue/default_task_queue_factory.h"
 #include "api/test/loopback_media_transport.h"
 #include "api/test/mock_audio_mixer.h"
+#include "api/transport/media/media_transport_config.h"
 #include "audio/audio_receive_stream.h"
 #include "audio/audio_send_stream.h"
 #include "call/rtp_transport_controller_send.h"
 #include "call/test/mock_bitrate_allocator.h"
-#include "logging/rtc_event_log/rtc_event_log.h"
 #include "modules/audio_device/include/test_audio_device.h"
 #include "modules/audio_mixer/audio_mixer_impl.h"
 #include "modules/audio_processing/include/mock_audio_processing.h"
@@ -72,6 +73,8 @@ class TestRenderer : public TestAudioDeviceModule::Renderer {
 TEST(AudioWithMediaTransport, DeliversAudio) {
   std::unique_ptr<rtc::Thread> transport_thread = rtc::Thread::Create();
   transport_thread->Start();
+  std::unique_ptr<TaskQueueFactory> task_queue_factory =
+      CreateDefaultTaskQueueFactory();
   MediaTransportPair transport_pair(transport_thread.get());
   NiceMock<MockTransport> rtcp_send_transport;
   NiceMock<MockTransport> send_transport;
@@ -79,11 +82,12 @@ TEST(AudioWithMediaTransport, DeliversAudio) {
   NiceMock<MockBitrateAllocator> bitrate_allocator;
 
   rtc::scoped_refptr<TestAudioDeviceModule> audio_device =
-      TestAudioDeviceModule::CreateTestAudioDeviceModule(
+      TestAudioDeviceModule::Create(
+          task_queue_factory.get(),
           TestAudioDeviceModule::CreatePulsedNoiseCapturer(
               /* max_amplitude= */ 10000, kSamplingFrequency, kNumChannels),
-          absl::make_unique<TestRenderer>(kSamplingFrequency, kNumChannels,
-                                          kWantedSamples));
+          std::make_unique<TestRenderer>(kSamplingFrequency, kNumChannels,
+                                         kWantedSamples));
 
   AudioState::Config audio_config;
   audio_config.audio_mixer = AudioMixerImpl::Create();
@@ -125,8 +129,6 @@ TEST(AudioWithMediaTransport, DeliversAudio) {
   send_config.encoder_factory = CreateAudioEncoderFactory<AudioEncoderOpus>();
   std::unique_ptr<ProcessThread> send_process_thread =
       ProcessThread::Create("audio send thread");
-  std::unique_ptr<TaskQueueFactory> task_queue_factory =
-      CreateDefaultTaskQueueFactory();
   RtpTransportControllerSend rtp_transport(
       Clock::GetRealTimeClock(), &null_event_log, nullptr, nullptr,
       BitrateConstraints(), ProcessThread::Create("Pacer"),

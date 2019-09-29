@@ -28,14 +28,25 @@ enum {
    * side, we must allow for packets of that size. NetEq is currently limited
    * to 60 ms on the receive side. */
   kWebRtcOpusMaxDecodeFrameSizeMs = 120,
-
-  /* Maximum sample count per channel is 48 kHz * maximum frame size in
-   * milliseconds. */
-  kWebRtcOpusMaxFrameSizePerChannel = 48 * kWebRtcOpusMaxDecodeFrameSizeMs,
-
-  /* Default frame size, 20 ms @ 48 kHz, in samples (for one channel). */
-  kWebRtcOpusDefaultFrameSize = 960,
 };
+
+static int FrameSizePerChannel(int frame_size_ms, int sample_rate_hz) {
+  RTC_DCHECK_GT(frame_size_ms, 0);
+  RTC_DCHECK_EQ(frame_size_ms % 10, 0);
+  RTC_DCHECK_GT(sample_rate_hz, 0);
+  RTC_DCHECK_EQ(sample_rate_hz % 1000, 0);
+  return frame_size_ms * (sample_rate_hz / 1000);
+}
+
+// Maximum sample count per channel.
+static int MaxFrameSizePerChannel(int sample_rate_hz) {
+  return FrameSizePerChannel(kWebRtcOpusMaxDecodeFrameSizeMs, sample_rate_hz);
+}
+
+// Default sample count per channel.
+static int DefaultFrameSizePerChannel(int sample_rate_hz) {
+  return FrameSizePerChannel(20, sample_rate_hz);
+}
 
 int16_t WebRtcOpus_EncoderCreate(OpusEncInst** inst,
                                  size_t channels,
@@ -374,7 +385,9 @@ int16_t WebRtcOpus_SetForceChannels(OpusEncInst* inst, size_t num_channels) {
   }
 }
 
-int16_t WebRtcOpus_DecoderCreate(OpusDecInst** inst, size_t channels) {
+int16_t WebRtcOpus_DecoderCreate(OpusDecInst** inst,
+                                 size_t channels,
+                                 int sample_rate_hz) {
   int error;
   OpusDecInst* state;
 
@@ -385,14 +398,13 @@ int16_t WebRtcOpus_DecoderCreate(OpusDecInst** inst, size_t channels) {
       return -1;
     }
 
-    // Create new memory, always at 48000 Hz.
-    state->decoder = opus_decoder_create(48000,
-                                                 (int)channels, &error);
+    state->decoder = opus_decoder_create(sample_rate_hz, (int)channels, &error);
     if (error == OPUS_OK && state->decoder) {
       // Creation of memory all ok.
       state->channels = channels;
-      state->prev_decoded_samples = kWebRtcOpusDefaultFrameSize;
+      state->prev_decoded_samples = DefaultFrameSizePerChannel(sample_rate_hz);
       state->in_dtx_mode = 0;
+      state->sample_rate_hz = sample_rate_hz;
       *inst = state;
       return 0;
     }
@@ -432,8 +444,9 @@ int16_t WebRtcOpus_MultistreamDecoderCreate(
     if (error == OPUS_OK && state->multistream_decoder) {
       // Creation of memory all ok.
       state->channels = channels;
-      state->prev_decoded_samples = kWebRtcOpusDefaultFrameSize;
+      state->prev_decoded_samples = DefaultFrameSizePerChannel(48000);
       state->in_dtx_mode = 0;
+      state->sample_rate_hz = 48000;
       *inst = state;
       return 0;
     }
@@ -529,13 +542,9 @@ int WebRtcOpus_Decode(OpusDecInst* inst, const uint8_t* encoded,
     *audio_type = DetermineAudioType(inst, encoded_bytes);
     decoded_samples = WebRtcOpus_DecodePlc(inst, decoded, 1);
   } else {
-    decoded_samples = DecodeNative(inst,
-                                   encoded,
-                                   encoded_bytes,
-                                   kWebRtcOpusMaxFrameSizePerChannel,
-                                   decoded,
-                                   audio_type,
-                                   0);
+    decoded_samples = DecodeNative(inst, encoded, encoded_bytes,
+                                   MaxFrameSizePerChannel(inst->sample_rate_hz),
+                                   decoded, audio_type, 0);
   }
   if (decoded_samples < 0) {
     return -1;
@@ -555,10 +564,13 @@ int WebRtcOpus_DecodePlc(OpusDecInst* inst, int16_t* decoded,
 
   /* The number of samples we ask for is |number_of_lost_frames| times
    * |prev_decoded_samples_|. Limit the number of samples to maximum
-   * |kWebRtcOpusMaxFrameSizePerChannel|. */
+   * |MaxFrameSizePerChannel()|. */
   plc_samples = number_of_lost_frames * inst->prev_decoded_samples;
-  plc_samples = (plc_samples <= kWebRtcOpusMaxFrameSizePerChannel) ?
-      plc_samples : kWebRtcOpusMaxFrameSizePerChannel;
+  const int max_samples_per_channel =
+      MaxFrameSizePerChannel(inst->sample_rate_hz);
+  plc_samples = plc_samples <= max_samples_per_channel
+                    ? plc_samples
+                    : max_samples_per_channel;
   decoded_samples = DecodeNative(inst, NULL, 0, plc_samples,
                                  decoded, &audio_type, 0);
   if (decoded_samples < 0) {
@@ -578,7 +590,8 @@ int WebRtcOpus_DecodeFec(OpusDecInst* inst, const uint8_t* encoded,
     return 0;
   }
 
-  fec_samples = opus_packet_get_samples_per_frame(encoded, 48000);
+  fec_samples =
+      opus_packet_get_samples_per_frame(encoded, inst->sample_rate_hz);
 
   decoded_samples = DecodeNative(inst, encoded, encoded_bytes,
                                  fec_samples, decoded, audio_type, 1);
@@ -604,9 +617,10 @@ int WebRtcOpus_DurationEst(OpusDecInst* inst,
     /* Invalid payload data. */
     return 0;
   }
-  samples = frames * opus_packet_get_samples_per_frame(payload, 48000);
-  if (samples < 120 || samples > 5760) {
-    /* Invalid payload duration. */
+  samples =
+      frames * opus_packet_get_samples_per_frame(payload, inst->sample_rate_hz);
+  if (samples > 120 * inst->sample_rate_hz / 1000) {
+    // More than 120 ms' worth of samples.
     return 0;
   }
   return samples;
@@ -615,67 +629,48 @@ int WebRtcOpus_DurationEst(OpusDecInst* inst,
 int WebRtcOpus_PlcDuration(OpusDecInst* inst) {
   /* The number of samples we ask for is |number_of_lost_frames| times
    * |prev_decoded_samples_|. Limit the number of samples to maximum
-   * |kWebRtcOpusMaxFrameSizePerChannel|. */
+   * |MaxFrameSizePerChannel()|. */
   const int plc_samples = inst->prev_decoded_samples;
-  return (plc_samples <= kWebRtcOpusMaxFrameSizePerChannel) ?
-      plc_samples : kWebRtcOpusMaxFrameSizePerChannel;
+  const int max_samples_per_channel =
+      MaxFrameSizePerChannel(inst->sample_rate_hz);
+  return plc_samples <= max_samples_per_channel ? plc_samples
+                                                : max_samples_per_channel;
 }
 
 int WebRtcOpus_FecDurationEst(const uint8_t* payload,
-                              size_t payload_length_bytes) {
-  int samples;
+                              size_t payload_length_bytes,
+                              int sample_rate_hz) {
   if (WebRtcOpus_PacketHasFec(payload, payload_length_bytes) != 1) {
     return 0;
   }
-
-  samples = opus_packet_get_samples_per_frame(payload, 48000);
-  if (samples < 480 || samples > 5760) {
+  const int samples =
+      opus_packet_get_samples_per_frame(payload, sample_rate_hz);
+  const int samples_per_ms = sample_rate_hz / 1000;
+  if (samples < 10 * samples_per_ms || samples > 120 * samples_per_ms) {
     /* Invalid payload duration. */
     return 0;
   }
   return samples;
 }
 
+// This method is based on Definition of the Opus Audio Codec
+// (https://tools.ietf.org/html/rfc6716). Basically, this method is based on
+// parsing the LP layer of an Opus packet, particularly the LBRR flag.
 int WebRtcOpus_PacketHasFec(const uint8_t* payload,
                             size_t payload_length_bytes) {
-  int frames, channels, payload_length_ms;
-  int n;
-  opus_int16 frame_sizes[48];
-  const unsigned char *frame_data[48];
-
   if (payload == NULL || payload_length_bytes == 0)
     return 0;
 
-  /* In CELT_ONLY mode, packets should not have FEC. */
+  // In CELT_ONLY mode, packets should not have FEC.
   if (payload[0] & 0x80)
     return 0;
 
-  payload_length_ms = opus_packet_get_samples_per_frame(payload, 48000) / 48;
-  if (10 > payload_length_ms)
-    payload_length_ms = 10;
+  // Max number of frames in an Opus packet is 48.
+  opus_int16 frame_sizes[48];
+  const unsigned char *frame_data[48];
 
-  channels = opus_packet_get_nb_channels(payload);
-
-  switch (payload_length_ms) {
-    case 10:
-    case 20: {
-      frames = 1;
-      break;
-    }
-    case 40: {
-      frames = 2;
-      break;
-    }
-    case 60: {
-      frames = 3;
-      break;
-    }
-    default: {
-      return 0; // It is actually even an invalid packet.
-    }
-  }
-
-  /* The following is to parse the LBRR flags. */
+  // Parse packet to get the frames. But we only care about the first frame,
+  // since we can only decode the FEC from the first one.
   if (opus_packet_parse(payload, (opus_int32)payload_length_bytes, NULL,
                         frame_data, frame_sizes, NULL) < 0) {
     return 0;
@@ -685,8 +680,44 @@ int WebRtcOpus_PacketHasFec(const uint8_t* payload,
     return 0;
   }
 
-  for (n = 0; n < channels; n++) {
-    if (frame_data[0][0] & (0x80 >> ((n + 1) * (frames + 1) - 1)))
+  // For computing the payload length in ms, the sample rate is not important
+  // since it cancels out. We use 48 kHz, but any valid sample rate would work.
+  int payload_length_ms =
+      opus_packet_get_samples_per_frame(payload, 48000) / 48;
+  if (payload_length_ms < 10)
+    payload_length_ms = 10;
+
+  int silk_frames;
+  switch (payload_length_ms) {
+    case 10:
+    case 20:
+      silk_frames = 1;
+      break;
+    case 40:
+      silk_frames = 2;
+      break;
+    case 60:
+      silk_frames = 3;
+      break;
+    default:
+      return 0; // It is actually even an invalid packet.
+  }
+
+  const int channels = opus_packet_get_nb_channels(payload);
+  RTC_DCHECK(channels == 1 || channels == 2);
+
+  // A frame starts with the LP layer. The LP layer begins with two to eight
+  // header bits.These consist of one VAD bit per SILK frame (up to 3),
+  // followed by a single flag indicating the presence of LBRR frames.
+  // For a stereo packet, these first flags correspond to the mid channel, and
+  // a second set of flags is included for the side channel. Because these are
+  // the first symbols decoded by the range coder and because they are coded
+  // as binary values with uniform probability, they can be extracted directly
+  // from the most significant bits of the first byte of compressed data.
+  for (int n = 0; n < channels; n++) {
+    // The LBRR bit for channel 1 is on the (|silk_frames| + 1)-th bit, and
+    // that of channel 2 is on the |(|silk_frames| + 1) * 2 + 1|-th bit.
+    if (frame_data[0][0] & (0x80 >> ((n + 1) * (silk_frames + 1) - 1)))
       return 1;
   }
 

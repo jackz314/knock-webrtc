@@ -11,7 +11,9 @@
 
 #include <utility>
 
+#include "api/stats_types.h"
 #include "rtc_base/event.h"
+#include "system_wrappers/include/field_trial.h"
 #include "test/testsupport/perf_test.h"
 
 namespace webrtc {
@@ -20,6 +22,10 @@ namespace {
 
 constexpr int kStatsWaitTimeoutMs = 1000;
 
+// Field trial which controls whether to report standard-compliant bytes
+// sent/received per stream.  If enabled, padding and headers are not included
+// in bytes sent or received.
+constexpr char kUseStandardBytesStats[] = "WebRTC-UseStandardBytesStats";
 }
 
 void NetworkQualityMetricsReporter::Start(absl::string_view test_case_name) {
@@ -33,6 +39,24 @@ void NetworkQualityMetricsReporter::Start(absl::string_view test_case_name) {
   RTC_CHECK_EQ(bob_stats.packets_received, 0);
 }
 
+void NetworkQualityMetricsReporter::OnStatsReports(
+    const std::string& pc_label,
+    const StatsReports& reports) {
+  rtc::CritScope cs(&lock_);
+  PCStats& stats = pc_stats_[pc_label];
+  for (const StatsReport* report : reports) {
+    const auto* received =
+        report->FindValue(StatsReport::kStatsValueNameBytesReceived);
+    if (received) {
+      stats.payload_bytes_received = received->int64_val();
+    }
+    const auto* sent = report->FindValue(StatsReport::kStatsValueNameBytesSent);
+    if (sent) {
+      stats.payload_bytes_sent = sent->int64_val();
+    }
+  }
+}
+
 void NetworkQualityMetricsReporter::StopAndReportResults() {
   EmulatedNetworkStats alice_stats = PopulateStats(alice_network_);
   EmulatedNetworkStats bob_stats = PopulateStats(bob_network_);
@@ -40,6 +64,16 @@ void NetworkQualityMetricsReporter::StopAndReportResults() {
               alice_stats.packets_sent - bob_stats.packets_received);
   ReportStats("bob", bob_stats,
               bob_stats.packets_sent - alice_stats.packets_received);
+
+  if (!webrtc::field_trial::IsEnabled(kUseStandardBytesStats)) {
+    RTC_LOG(LS_ERROR)
+        << "Non-standard GetStats; \"payload\" counts include RTP headers";
+  }
+
+  rtc::CritScope cs(&lock_);
+  for (const auto& pair : pc_stats_) {
+    ReportPCStats(pair.first, pair.second);
+  }
 }
 
 EmulatedNetworkStats NetworkQualityMetricsReporter::PopulateStats(
@@ -62,8 +96,10 @@ void NetworkQualityMetricsReporter::ReportStats(
   ReportResult("bytes_sent", network_label, stats.bytes_sent.bytes(),
                "sizeInBytes");
   ReportResult("packets_sent", network_label, stats.packets_sent, "unitless");
-  ReportResult("average_send_rate", network_label,
-               stats.AverageSendRate().bytes_per_sec(), "bytesPerSecond");
+  ReportResult(
+      "average_send_rate", network_label,
+      stats.packets_sent >= 2 ? stats.AverageSendRate().bytes_per_sec() : 0,
+      "bytesPerSecond");
   ReportResult("bytes_dropped", network_label, stats.bytes_dropped.bytes(),
                "sizeInBytes");
   ReportResult("packets_dropped", network_label, stats.packets_dropped,
@@ -73,8 +109,19 @@ void NetworkQualityMetricsReporter::ReportStats(
   ReportResult("packets_received", network_label, stats.packets_received,
                "unitless");
   ReportResult("average_receive_rate", network_label,
-               stats.AverageReceiveRate().bytes_per_sec(), "bytesPerSecond");
+               stats.packets_received >= 2
+                   ? stats.AverageReceiveRate().bytes_per_sec()
+                   : 0,
+               "bytesPerSecond");
   ReportResult("sent_packets_loss", network_label, packet_loss, "unitless");
+}
+
+void NetworkQualityMetricsReporter::ReportPCStats(const std::string& pc_label,
+                                                  const PCStats& stats) {
+  ReportResult("payload_bytes_received", pc_label, stats.payload_bytes_received,
+               "sizeInBytes");
+  ReportResult("payload_bytes_sent", pc_label, stats.payload_bytes_sent,
+               "sizeInBytes");
 }
 
 void NetworkQualityMetricsReporter::ReportResult(

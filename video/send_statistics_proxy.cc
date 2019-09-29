@@ -11,11 +11,15 @@
 #include "video/send_statistics_proxy.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <utility>
 
 #include "absl/algorithm/container.h"
+#include "api/video/video_codec_constants.h"
+#include "api/video/video_codec_type.h"
+#include "api/video_codecs/video_codec.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/logging.h"
@@ -137,8 +141,12 @@ SendStatisticsProxy::SendStatisticsProxy(
       encode_time_(kEncodeTimeWeigthFactor),
       quality_downscales_(-1),
       cpu_downscales_(-1),
+      quality_limitation_reason_tracker_(clock_),
       media_byte_rate_tracker_(kBucketSizeMs, kBucketCount),
       encoded_frame_rate_tracker_(kBucketSizeMs, kBucketCount),
+      last_num_spatial_layers_(0),
+      last_num_simulcast_streams_(0),
+      last_spatial_layer_use_{},
       uma_container_(
           new UmaSamplesContainer(GetUmaPrefix(content_type_), stats_, clock)) {
 }
@@ -729,6 +737,8 @@ VideoSendStream::Stats SendStatisticsProxy::GetStats() {
           : VideoContentType::SCREENSHARE;
   stats_.encode_frame_rate = round(encoded_frame_rate_tracker_.ComputeRate());
   stats_.media_bitrate_bps = media_byte_rate_tracker_.ComputeRate() * 8;
+  stats_.quality_limitation_durations_ms =
+      quality_limitation_reason_tracker_.DurationsMs();
   return stats_;
 }
 
@@ -1062,6 +1072,26 @@ void SendStatisticsProxy::OnAdaptationChanged(
       ++stats_.number_of_quality_adapt_changes;
       break;
   }
+
+  bool is_cpu_limited = cpu_counts.num_resolution_reductions > 0 ||
+                        cpu_counts.num_framerate_reductions > 0;
+  bool is_bandwidth_limited = quality_counts.num_resolution_reductions > 0 ||
+                              quality_counts.num_framerate_reductions > 0;
+  if (is_bandwidth_limited) {
+    // We may be both CPU limited and bandwidth limited at the same time but
+    // there is no way to express this in standardized stats. Heuristically,
+    // bandwidth is more likely to be a limiting factor than CPU, and more
+    // likely to vary over time, so only when we aren't bandwidth limited do we
+    // want to know about our CPU being the bottleneck.
+    quality_limitation_reason_tracker_.SetReason(
+        QualityLimitationReason::kBandwidth);
+  } else if (is_cpu_limited) {
+    quality_limitation_reason_tracker_.SetReason(QualityLimitationReason::kCpu);
+  } else {
+    quality_limitation_reason_tracker_.SetReason(
+        QualityLimitationReason::kNone);
+  }
+
   UpdateAdaptationStats(cpu_counts, quality_counts);
 }
 
@@ -1075,6 +1105,47 @@ void SendStatisticsProxy::UpdateAdaptationStats(
   stats_.cpu_limited_framerate = cpu_counts.num_framerate_reductions > 0;
   stats_.bw_limited_resolution = quality_counts.num_resolution_reductions > 0;
   stats_.bw_limited_framerate = quality_counts.num_framerate_reductions > 0;
+  stats_.quality_limitation_reason =
+      quality_limitation_reason_tracker_.current_reason();
+  // |stats_.quality_limitation_durations_ms| depends on the current time
+  // when it is polled; it is updated in SendStatisticsProxy::GetStats().
+}
+
+void SendStatisticsProxy::OnBitrateAllocationUpdated(
+    const VideoCodec& codec,
+    const VideoBitrateAllocation& allocation) {
+  int num_spatial_layers = 0;
+  for (int i = 0; i < kMaxSpatialLayers; i++) {
+    if (codec.spatialLayers[i].active) {
+      num_spatial_layers++;
+    }
+  }
+  int num_simulcast_streams = 0;
+  for (int i = 0; i < kMaxSimulcastStreams; i++) {
+    if (codec.simulcastStream[i].active) {
+      num_simulcast_streams++;
+    }
+  }
+
+  std::array<bool, kMaxSpatialLayers> spatial_layers;
+  for (int i = 0; i < kMaxSpatialLayers; i++) {
+    spatial_layers[i] = (allocation.GetSpatialLayerSum(i) > 0);
+  }
+
+  rtc::CritScope lock(&crit_);
+
+  if (spatial_layers != last_spatial_layer_use_) {
+    // If the number of spatial layers has changed, the resolution change is
+    // not due to quality limitations, it is because the configuration
+    // changed.
+    if (last_num_spatial_layers_ == num_spatial_layers &&
+        last_num_simulcast_streams_ == num_simulcast_streams) {
+      ++stats_.quality_limitation_resolution_changes;
+    }
+    last_spatial_layer_use_ = spatial_layers;
+  }
+  last_num_spatial_layers_ = num_spatial_layers;
+  last_num_simulcast_streams_ = num_simulcast_streams;
 }
 
 // TODO(asapersson): Include fps changes.
@@ -1131,10 +1202,8 @@ void SendStatisticsProxy::StatisticsUpdated(const RtcpStatistics& statistics,
     return;
 
   stats->rtcp_stats = statistics;
-  uma_container_->report_block_stats_.Store(statistics, 0, ssrc);
+  uma_container_->report_block_stats_.Store(ssrc, statistics);
 }
-
-void SendStatisticsProxy::CNameChanged(const char* cname, uint32_t ssrc) {}
 
 void SendStatisticsProxy::OnReportBlockDataUpdated(
     ReportBlockData report_block_data) {

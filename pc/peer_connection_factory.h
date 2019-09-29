@@ -16,9 +16,9 @@
 #include <string>
 
 #include "api/media_stream_interface.h"
-#include "api/media_transport_interface.h"
 #include "api/peer_connection_interface.h"
 #include "api/scoped_refptr.h"
+#include "api/transport/media/media_transport_interface.h"
 #include "media/sctp/sctp_transport_internal.h"
 #include "pc/channel_manager.h"
 #include "rtc_base/rtc_certificate_generator.h"
@@ -69,7 +69,7 @@ class PeerConnectionFactory : public PeerConnectionFactoryInterface {
       const std::string& id,
       AudioSourceInterface* audio_source) override;
 
-  bool StartAecDump(rtc::PlatformFile file, int64_t max_size_bytes) override;
+  bool StartAecDump(FILE* file, int64_t max_size_bytes) override;
   void StopAecDump() override;
 
   virtual std::unique_ptr<cricket::SctpTransportInternalFactory>

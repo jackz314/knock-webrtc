@@ -10,10 +10,10 @@
 
 #include "media/base/fake_media_engine.h"
 
+#include <memory>
 #include <utility>
 
 #include "absl/algorithm/container.h"
-#include "absl/memory/memory.h"
 #include "absl/strings/match.h"
 #include "rtc_base/checks.h"
 
@@ -228,7 +228,7 @@ bool FakeVoiceMediaChannel::SetLocalSource(uint32_t ssrc, AudioSource* source) {
       RTC_CHECK(it->second->source() == source);
     } else {
       local_sinks_.insert(std::make_pair(
-          ssrc, absl::make_unique<VoiceChannelAudioSink>(source)));
+          ssrc, std::make_unique<VoiceChannelAudioSink>(source)));
     }
   } else {
     if (it != local_sinks_.end()) {
@@ -542,16 +542,11 @@ void FakeVoiceEngine::SetSendCodecs(const std::vector<AudioCodec>& codecs) {
 int FakeVoiceEngine::GetInputLevel() {
   return 0;
 }
-bool FakeVoiceEngine::StartAecDump(rtc::PlatformFile file,
+bool FakeVoiceEngine::StartAecDump(webrtc::FileWrapper file,
                                    int64_t max_size_bytes) {
   return false;
 }
 void FakeVoiceEngine::StopAecDump() {}
-bool FakeVoiceEngine::StartRtcEventLog(rtc::PlatformFile file,
-                                       int64_t max_size_bytes) {
-  return false;
-}
-void FakeVoiceEngine::StopRtcEventLog() {}
 
 FakeVideoEngine::FakeVideoEngine()
     : capture_(false), fail_create_channel_(false) {
@@ -600,8 +595,8 @@ bool FakeVideoEngine::SetCapture(bool capture) {
 }
 
 FakeMediaEngine::FakeMediaEngine()
-    : CompositeMediaEngine(absl::make_unique<FakeVoiceEngine>(),
-                           absl::make_unique<FakeVideoEngine>()),
+    : CompositeMediaEngine(std::make_unique<FakeVoiceEngine>(),
+                           std::make_unique<FakeVideoEngine>()),
       voice_(static_cast<FakeVoiceEngine*>(&voice())),
       video_(static_cast<FakeVideoEngine*>(&video())) {}
 FakeMediaEngine::~FakeMediaEngine() {}

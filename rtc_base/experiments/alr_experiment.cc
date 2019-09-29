@@ -12,6 +12,7 @@
 
 #include <inttypes.h>
 #include <stdio.h>
+
 #include <string>
 
 #include "api/transport/field_trial_based_config.h"
@@ -79,9 +80,9 @@ AlrExperimentSettings::CreateFromFieldTrial(
                         "pacing factor: "
                      << settings.pacing_factor << ", max pacer queue length: "
                      << settings.max_paced_queue_time
-                     << ", ALR start bandwidth usage percent: "
+                     << ", ALR bandwidth usage percent: "
                      << settings.alr_bandwidth_usage_percent
-                     << ", ALR end budget level percent: "
+                     << ", ALR start budget level percent: "
                      << settings.alr_start_budget_level_percent
                      << ", ALR end budget level percent: "
                      << settings.alr_stop_budget_level_percent

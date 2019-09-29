@@ -11,6 +11,7 @@
 #include "modules/rtp_rtcp/source/rtp_format_h264.h"
 
 #include <string.h>
+
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
@@ -75,27 +76,15 @@ RtpPacketizerH264::RtpPacketizerH264(
     PayloadSizeLimits limits,
     H264PacketizationMode packetization_mode,
     const RTPFragmentationHeader& fragmentation)
-    : limits_(limits),
-      modified_buffer_(new rtc::Buffer()),
-      num_packets_left_(0) {
+    : limits_(limits), num_packets_left_(0) {
   // Guard against uninitialized memory in packetization_mode.
   RTC_CHECK(packetization_mode == H264PacketizationMode::NonInterleaved ||
             packetization_mode == H264PacketizationMode::SingleNalUnit);
 
-  RTPFragmentationHeader modified_fragmentation;
-  modified_fragmentation.CopyFrom(fragmentation);
-
-  SpsVuiRewriter::ParseOutgoingBitstreamAndRewriteSps(
-      payload, fragmentation.fragmentationVectorSize,
-      fragmentation.fragmentationOffset, fragmentation.fragmentationLength,
-      modified_buffer_.get(), modified_fragmentation.fragmentationOffset,
-      modified_fragmentation.fragmentationLength);
-
-  for (size_t i = 0; i < modified_fragmentation.fragmentationVectorSize; ++i) {
-    const uint8_t* fragment = modified_buffer_->data() +
-                              modified_fragmentation.fragmentationOffset[i];
-    const size_t fragment_length =
-        modified_fragmentation.fragmentationLength[i];
+  for (size_t i = 0; i < fragmentation.fragmentationVectorSize; ++i) {
+    const uint8_t* fragment =
+        payload.data() + fragmentation.fragmentationOffset[i];
+    const size_t fragment_length = fragmentation.fragmentationLength[i];
     input_fragments_.push_back(Fragment(fragment, fragment_length));
   }
 
@@ -469,7 +458,7 @@ bool RtpDepacketizerH264::ProcessStapAOrSingleNalu(
 
         SpsVuiRewriter::ParseResult result = SpsVuiRewriter::ParseAndRewriteSps(
             &payload_data[start_offset], end_offset - start_offset, &sps,
-            output_buffer.get(), SpsVuiRewriter::Direction::kIncoming);
+            nullptr, output_buffer.get(), SpsVuiRewriter::Direction::kIncoming);
 
         if (result == SpsVuiRewriter::ParseResult::kVuiRewritten) {
           if (modified_buffer_) {

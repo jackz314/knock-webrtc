@@ -8,11 +8,12 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
-#include "modules/video_coding/rtp_frame_reference_finder.h"
+#include <memory>
 
-#include "absl/memory/memory.h"
+#include "api/rtp_packet_infos.h"
 #include "modules/video_coding/frame_object.h"
 #include "modules/video_coding/packet_buffer.h"
+#include "modules/video_coding/rtp_frame_reference_finder.h"
 #include "system_wrappers/include/clock.h"
 
 namespace webrtc {
@@ -99,13 +100,6 @@ class FuzzyPacketBuffer : public video_coding::PacketBuffer {
     return packet;
   }
 
-  bool GetBitstream(const video_coding::RtpFrameObject& frame,
-                    uint8_t* destination) override {
-    return true;
-  }
-
-  void ReturnFrame(video_coding::RtpFrameObject* frame) override {}
-
  private:
   std::map<uint16_t, VCMPacket> packets;
   VideoCodecType codec;
@@ -118,13 +112,22 @@ void FuzzOneInput(const uint8_t* data, size_t size) {
     return;
   }
   DataReader reader(data, size);
-  rtc::scoped_refptr<FuzzyPacketBuffer> pb(new FuzzyPacketBuffer(&reader));
+  FuzzyPacketBuffer packet_buffer(&reader);
   NullCallback cb;
   video_coding::RtpFrameReferenceFinder reference_finder(&cb);
 
   while (reader.MoreToRead()) {
-    auto frame = absl::make_unique<video_coding::RtpFrameObject>(
-        pb, reader.GetNum<uint16_t>(), reader.GetNum<uint16_t>(), 0, 0, 0, 0);
+    // Make sure that these packets fulfill the contract of RtpFrameObject.
+    uint16_t first_seq_num = reader.GetNum<uint16_t>();
+    uint16_t last_seq_num = reader.GetNum<uint16_t>();
+    VCMPacket* first_packet = packet_buffer.GetPacket(first_seq_num);
+    VCMPacket* last_packet = packet_buffer.GetPacket(last_seq_num);
+    first_packet->video_header.is_first_packet_in_frame = true;
+    last_packet->video_header.is_last_packet_in_frame = true;
+
+    auto frame = std::make_unique<video_coding::RtpFrameObject>(
+        &packet_buffer, first_seq_num, last_seq_num, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
     reference_finder.ManageFrame(std::move(frame));
   }
 }

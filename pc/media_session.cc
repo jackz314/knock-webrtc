@@ -19,7 +19,6 @@
 #include <utility>
 
 #include "absl/algorithm/container.h"
-#include "absl/memory/memory.h"
 #include "absl/strings/match.h"
 #include "absl/types/optional.h"
 #include "api/crypto_params.h"
@@ -31,6 +30,7 @@
 #include "pc/media_protocol_names.h"
 #include "pc/rtp_media_utils.h"
 #include "pc/srtp_filter.h"
+#include "pc/used_ids.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/helpers.h"
 #include "rtc_base/logging.h"
@@ -281,94 +281,6 @@ void FilterDataCodecs(std::vector<DataCodec>* codecs, bool sctp) {
                 codecs->end());
 }
 
-template <typename IdStruct>
-class UsedIds {
- public:
-  UsedIds(int min_allowed_id, int max_allowed_id)
-      : min_allowed_id_(min_allowed_id),
-        max_allowed_id_(max_allowed_id),
-        next_id_(max_allowed_id) {}
-
-  // Loops through all Id in |ids| and changes its id if it is
-  // already in use by another IdStruct. Call this methods with all Id
-  // in a session description to make sure no duplicate ids exists.
-  // Note that typename Id must be a type of IdStruct.
-  template <typename Id>
-  void FindAndSetIdUsed(std::vector<Id>* ids) {
-    for (const Id& id : *ids) {
-      FindAndSetIdUsed(&id);
-    }
-  }
-
-  // Finds and sets an unused id if the |idstruct| id is already in use.
-  void FindAndSetIdUsed(IdStruct* idstruct) {
-    const int original_id = idstruct->id;
-    int new_id = idstruct->id;
-
-    if (original_id > max_allowed_id_ || original_id < min_allowed_id_) {
-      // If the original id is not in range - this is an id that can't be
-      // dynamically changed.
-      return;
-    }
-
-    if (IsIdUsed(original_id)) {
-      new_id = FindUnusedId();
-      RTC_LOG(LS_WARNING) << "Duplicate id found. Reassigning from "
-                          << original_id << " to " << new_id;
-      idstruct->id = new_id;
-    }
-    SetIdUsed(new_id);
-  }
-
- private:
-  // Returns the first unused id in reverse order.
-  // This hopefully reduce the risk of more collisions. We want to change the
-  // default ids as little as possible.
-  int FindUnusedId() {
-    while (IsIdUsed(next_id_) && next_id_ >= min_allowed_id_) {
-      --next_id_;
-    }
-    RTC_DCHECK(next_id_ >= min_allowed_id_);
-    return next_id_;
-  }
-
-  bool IsIdUsed(int new_id) { return id_set_.find(new_id) != id_set_.end(); }
-
-  void SetIdUsed(int new_id) { id_set_.insert(new_id); }
-
-  const int min_allowed_id_;
-  const int max_allowed_id_;
-  int next_id_;
-  std::set<int> id_set_;
-};
-
-// Helper class used for finding duplicate RTP payload types among audio, video
-// and data codecs. When bundle is used the payload types may not collide.
-class UsedPayloadTypes : public UsedIds<Codec> {
- public:
-  UsedPayloadTypes()
-      : UsedIds<Codec>(kDynamicPayloadTypeMin, kDynamicPayloadTypeMax) {}
-
- private:
-  static const int kDynamicPayloadTypeMin = 96;
-  static const int kDynamicPayloadTypeMax = 127;
-};
-
-// Helper class used for finding duplicate RTP Header extension ids among
-// audio and video extensions. Only applies to one-byte header extensions at the
-// moment. ids > 14 will always be reported as available.
-// TODO(kron): This class needs to be refactored when we start to send two-byte
-// header extensions.
-class UsedRtpHeaderExtensionIds : public UsedIds<webrtc::RtpExtension> {
- public:
-  UsedRtpHeaderExtensionIds()
-      : UsedIds<webrtc::RtpExtension>(
-            webrtc::RtpExtension::kMinId,
-            webrtc::RtpExtension::kOneByteHeaderExtensionMaxId) {}
-
- private:
-};
-
 static StreamParams CreateStreamParamsForNewSenderWithSsrcs(
     const SenderOptions& sender,
     const std::string& rtcp_cname,
@@ -540,12 +452,15 @@ static bool UpdateTransportInfoForBundle(const ContentGroup& bundle_group,
       selected_transport_info->description.ice_pwd;
   ConnectionRole selected_connection_role =
       selected_transport_info->description.connection_role;
+  const absl::optional<OpaqueTransportParameters>& selected_opaque_parameters =
+      selected_transport_info->description.opaque_parameters;
   for (TransportInfo& transport_info : sdesc->transport_infos()) {
     if (bundle_group.HasContentName(transport_info.content_name) &&
         transport_info.content_name != selected_content_name) {
       transport_info.description.ice_ufrag = selected_ufrag;
       transport_info.description.ice_pwd = selected_pwd;
       transport_info.description.connection_role = selected_connection_role;
+      transport_info.description.opaque_parameters = selected_opaque_parameters;
     }
   }
   return true;
@@ -787,6 +702,19 @@ static bool ReferencedCodecsMatch(const std::vector<C>& codecs1,
 }
 
 template <class C>
+static void NegotiatePacketization(const C& local_codec,
+                                   const C& remote_codec,
+                                   C* negotiated_codec) {}
+
+template <>
+void NegotiatePacketization(const VideoCodec& local_codec,
+                            const VideoCodec& remote_codec,
+                            VideoCodec* negotiated_codec) {
+  negotiated_codec->packetization =
+      VideoCodec::IntersectPacketization(local_codec, remote_codec);
+}
+
+template <class C>
 static void NegotiateCodecs(const std::vector<C>& local_codecs,
                             const std::vector<C>& offered_codecs,
                             std::vector<C>* negotiated_codecs,
@@ -797,6 +725,7 @@ static void NegotiateCodecs(const std::vector<C>& local_codecs,
     // local codecs, in case the remote offer contains duplicate codecs.
     if (FindMatchingCodec(local_codecs, offered_codecs, ours, &theirs)) {
       C negotiated = ours;
+      NegotiatePacketization(ours, theirs, &negotiated);
       negotiated.IntersectFeedbackParams(theirs);
       if (IsRtxCodec(negotiated)) {
         const auto apt_it =
@@ -1229,6 +1158,8 @@ static bool CreateMediaContentAnswer(
     answer->set_rtcp_reduced_size(offer->rtcp_reduced_size());
   }
 
+  answer->set_remote_estimate(offer->remote_estimate());
+
   if (sdes_policy != SEC_DISABLED) {
     CryptoParams crypto;
     if (SelectCrypto(offer, bundle_enabled, session_options.crypto_options,
@@ -1495,10 +1426,11 @@ std::unique_ptr<SessionDescription> MediaSessionDescriptionFactory::CreateOffer(
 
   RtpHeaderExtensions audio_rtp_extensions;
   RtpHeaderExtensions video_rtp_extensions;
-  GetRtpHdrExtsToOffer(current_active_contents, &audio_rtp_extensions,
-                       &video_rtp_extensions);
+  GetRtpHdrExtsToOffer(current_active_contents,
+                       session_options.offer_extmap_allow_mixed,
+                       &audio_rtp_extensions, &video_rtp_extensions);
 
-  auto offer = absl::make_unique<SessionDescription>();
+  auto offer = std::make_unique<SessionDescription>();
 
   // Iterate through the media description options, matching with existing media
   // descriptions in |current_description|.
@@ -1643,7 +1575,7 @@ MediaSessionDescriptionFactory::CreateAnswer(
   FilterDataCodecs(&answer_rtp_data_codecs,
                    session_options.data_channel_type == DCT_SCTP);
 
-  auto answer = absl::make_unique<SessionDescription>();
+  auto answer = std::make_unique<SessionDescription>();
 
   // If the offer supports BUNDLE, and we want to use it too, create a BUNDLE
   // group in the answer with the appropriate content names.
@@ -1941,11 +1873,19 @@ void MediaSessionDescriptionFactory::GetCodecsForAnswer(
 
 void MediaSessionDescriptionFactory::GetRtpHdrExtsToOffer(
     const std::vector<const ContentInfo*>& current_active_contents,
+    bool extmap_allow_mixed,
     RtpHeaderExtensions* offer_audio_extensions,
     RtpHeaderExtensions* offer_video_extensions) const {
   // All header extensions allocated from the same range to avoid potential
   // issues when using BUNDLE.
-  UsedRtpHeaderExtensionIds used_ids;
+
+  // Strictly speaking the SDP attribute extmap_allow_mixed signals that the
+  // receiver supports an RTP stream where one- and two-byte RTP header
+  // extensions are mixed. For backwards compatibility reasons it's used in
+  // WebRTC to signal that two-byte RTP header extensions are supported.
+  UsedRtpHeaderExtensionIds used_ids(
+      extmap_allow_mixed ? UsedRtpHeaderExtensionIds::IdDomain::kTwoByteAllowed
+                         : UsedRtpHeaderExtensionIds::IdDomain::kOneByteOnly);
   RtpHeaderExtensions all_regular_extensions;
   RtpHeaderExtensions all_encrypted_extensions;
 
@@ -2122,7 +2062,7 @@ bool MediaSessionDescriptionFactory::AddAudioContentForOffer(
   audio->set_direction(media_description_options.direction);
 
   desc->AddContent(media_description_options.mid, MediaProtocolType::kRtp,
-                   media_description_options.stopped, audio.release());
+                   media_description_options.stopped, std::move(audio));
   if (!AddTransportOffer(media_description_options.mid,
                          media_description_options.transport_options,
                          current_description, desc, ice_credentials)) {
@@ -2187,6 +2127,14 @@ bool MediaSessionDescriptionFactory::AddVideoContentForOffer(
     }
   }
 
+  if (session_options.raw_packetization_for_video) {
+    for (VideoCodec& codec : filtered_codecs) {
+      if (codec.GetCodecType() == VideoCodec::CODEC_VIDEO) {
+        codec.packetization = kPacketizationParamRaw;
+      }
+    }
+  }
+
   if (!CreateMediaContentOffer(media_description_options, session_options,
                                filtered_codecs, sdes_policy,
                                GetCryptos(current_content), crypto_suites,
@@ -2203,7 +2151,7 @@ bool MediaSessionDescriptionFactory::AddVideoContentForOffer(
   video->set_direction(media_description_options.direction);
 
   desc->AddContent(media_description_options.mid, MediaProtocolType::kRtp,
-                   media_description_options.stopped, video.release());
+                   media_description_options.stopped, std::move(video));
   if (!AddTransportOffer(media_description_options.mid,
                          media_description_options.transport_options,
                          current_description, desc, ice_credentials)) {
@@ -2249,7 +2197,7 @@ bool MediaSessionDescriptionFactory::AddSctpDataContentForOffer(
   }
 
   desc->AddContent(media_description_options.mid, MediaProtocolType::kSctp,
-                   data.release());
+                   std::move(data));
   if (!AddTransportOffer(media_description_options.mid,
                          media_description_options.transport_options,
                          current_description, desc, ice_credentials)) {
@@ -2288,7 +2236,7 @@ bool MediaSessionDescriptionFactory::AddRtpDataContentForOffer(
   data->set_bandwidth(kDataMaxBandwidth);
   SetMediaProtocol(secure_transport, data.get());
   desc->AddContent(media_description_options.mid, MediaProtocolType::kRtp,
-                   media_description_options.stopped, data.release());
+                   media_description_options.stopped, std::move(data));
   if (!AddTransportOffer(media_description_options.mid,
                          media_description_options.transport_options,
                          current_description, desc, ice_credentials)) {
@@ -2306,7 +2254,9 @@ bool MediaSessionDescriptionFactory::AddDataContentForOffer(
     StreamParamsVec* current_streams,
     SessionDescription* desc,
     IceCredentialsIterator* ice_credentials) const {
-  bool is_sctp = (session_options.data_channel_type == DCT_SCTP);
+  bool is_sctp =
+      (session_options.data_channel_type == DCT_SCTP ||
+       session_options.data_channel_type == DCT_DATA_CHANNEL_TRANSPORT_SCTP);
   // If the DataChannel type is not specified, use the DataChannel type in
   // the current description.
   if (session_options.data_channel_type == DCT_NONE && current_content) {
@@ -2443,7 +2393,7 @@ bool MediaSessionDescriptionFactory::AddAudioContentForAnswer(
   }
 
   answer->AddContent(media_description_options.mid, offer_content->type,
-                     rejected, audio_answer.release());
+                     rejected, std::move(audio_answer));
   return true;
 }
 
@@ -2504,6 +2454,14 @@ bool MediaSessionDescriptionFactory::AddVideoContentForAnswer(
     }
   }
 
+  if (session_options.raw_packetization_for_video) {
+    for (VideoCodec& codec : filtered_codecs) {
+      if (codec.GetCodecType() == VideoCodec::CODEC_VIDEO) {
+        codec.packetization = kPacketizationParamRaw;
+      }
+    }
+  }
+
   bool bundle_enabled = offer_description->HasGroup(GROUP_TYPE_BUNDLE) &&
                         session_options.bundle_enabled;
 
@@ -2544,7 +2502,7 @@ bool MediaSessionDescriptionFactory::AddVideoContentForAnswer(
                      << "' being rejected in answer.";
   }
   answer->AddContent(media_description_options.mid, offer_content->type,
-                     rejected, video_answer.release());
+                     rejected, std::move(video_answer));
   return true;
 }
 
@@ -2577,7 +2535,7 @@ bool MediaSessionDescriptionFactory::AddDataContentForAnswer(
   std::unique_ptr<MediaContentDescription> data_answer;
   if (offer_content->media_description()->as_sctp()) {
     // SCTP data content
-    data_answer = absl::make_unique<SctpDataContentDescription>();
+    data_answer = std::make_unique<SctpDataContentDescription>();
     const SctpDataContentDescription* offer_data_description =
         offer_content->media_description()->as_sctp();
     // Respond with the offerer's proto, whatever it is.
@@ -2605,7 +2563,7 @@ bool MediaSessionDescriptionFactory::AddDataContentForAnswer(
     data_answer->as_sctp()->set_use_sctpmap(offer_uses_sctpmap);
   } else {
     // RTP offer
-    data_answer = absl::make_unique<RtpDataContentDescription>();
+    data_answer = std::make_unique<RtpDataContentDescription>();
 
     const RtpDataContentDescription* offer_data_description =
         offer_content->media_description()->as_rtp_data();
@@ -2646,7 +2604,7 @@ bool MediaSessionDescriptionFactory::AddDataContentForAnswer(
     RTC_LOG(LS_INFO) << "Data is not supported in the answer.";
   }
   answer->AddContent(media_description_options.mid, offer_content->type,
-                     rejected, data_answer.release());
+                     rejected, std::move(data_answer));
   return true;
 }
 
@@ -2769,15 +2727,6 @@ const SctpDataContentDescription* GetFirstSctpDataContentDescription(
   return desc ? desc->as_sctp() : nullptr;
 }
 
-// Returns a shim representing either an SctpDataContentDescription
-// or an RtpDataContentDescription, as appropriate.
-// TODO(bugs.webrtc.org/10597): Remove together with shim.
-const DataContentDescription* GetFirstDataContentDescription(
-    const SessionDescription* sdesc) {
-  auto desc = GetFirstMediaContentDescription(sdesc, MEDIA_TYPE_DATA);
-  return desc ? desc->as_data() : nullptr;
-}
-
 //
 // Non-const versions of the above functions.
 //
@@ -2854,13 +2803,6 @@ SctpDataContentDescription* GetFirstSctpDataContentDescription(
     SessionDescription* sdesc) {
   auto desc = GetFirstMediaContentDescription(sdesc, MEDIA_TYPE_DATA);
   return desc ? desc->as_sctp() : nullptr;
-}
-
-// Returns shim
-DataContentDescription* GetFirstDataContentDescription(
-    SessionDescription* sdesc) {
-  auto desc = GetFirstMediaContentDescription(sdesc, MEDIA_TYPE_DATA);
-  return desc ? desc->as_data() : nullptr;
 }
 
 }  // namespace cricket

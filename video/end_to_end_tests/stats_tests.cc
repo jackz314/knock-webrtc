@@ -8,8 +8,9 @@
  *  be found in the AUTHORS file in the root of the source tree.
  */
 
+#include <memory>
+
 #include "absl/algorithm/container.h"
-#include "absl/memory/memory.h"
 #include "api/test/simulated_network.h"
 #include "api/test/video/function_video_encoder_factory.h"
 #include "call/fake_network_pipe.h"
@@ -56,7 +57,7 @@ TEST_F(StatsEndToEndTest, GetStats) {
     StatsObserver()
         : EndToEndTest(kLongTimeoutMs),
           encoder_factory_([]() {
-            return absl::make_unique<test::DelayedEncoder>(
+            return std::make_unique<test::DelayedEncoder>(
                 Clock::GetRealTimeClock(), 10);
           }),
           send_stream_(nullptr),
@@ -115,17 +116,13 @@ TEST_F(StatsEndToEndTest, GetStats) {
         receive_stats_filled_["FrameRendered"] |= stats.render_frame_rate != 0;
 
         receive_stats_filled_["StatisticsUpdated"] |=
-            stats.rtcp_stats.packets_lost != 0 ||
-            stats.rtcp_stats.extended_highest_sequence_number != 0 ||
-            stats.rtcp_stats.fraction_lost != 0 || stats.rtcp_stats.jitter != 0;
+            stats.rtp_stats.packets_lost != 0 || stats.rtp_stats.jitter != 0;
 
         receive_stats_filled_["DataCountersUpdated"] |=
-            stats.rtp_stats.transmitted.payload_bytes != 0 ||
-            stats.rtp_stats.fec.packets != 0 ||
-            stats.rtp_stats.transmitted.header_bytes != 0 ||
-            stats.rtp_stats.transmitted.packets != 0 ||
-            stats.rtp_stats.transmitted.padding_bytes != 0 ||
-            stats.rtp_stats.retransmitted.packets != 0;
+            stats.rtp_stats.packet_counter.payload_bytes != 0 ||
+            stats.rtp_stats.packet_counter.header_bytes != 0 ||
+            stats.rtp_stats.packet_counter.packets != 0 ||
+            stats.rtp_stats.packet_counter.padding_bytes != 0;
 
         receive_stats_filled_["CodecStats"] |= stats.target_delay_ms != 0;
 
@@ -236,16 +233,16 @@ TEST_F(StatsEndToEndTest, GetStats) {
     }
 
     test::PacketTransport* CreateSendTransport(
-        test::SingleThreadedTaskQueueForTesting* task_queue,
+        test::DEPRECATED_SingleThreadedTaskQueueForTesting* task_queue,
         Call* sender_call) override {
       BuiltInNetworkBehaviorConfig network_config;
       network_config.loss_percent = 5;
       return new test::PacketTransport(
           task_queue, sender_call, this, test::PacketTransport::kSender,
           payload_type_map_,
-          absl::make_unique<FakeNetworkPipe>(
+          std::make_unique<FakeNetworkPipe>(
               Clock::GetRealTimeClock(),
-              absl::make_unique<SimulatedNetwork>(network_config)));
+              std::make_unique<SimulatedNetwork>(network_config)));
     }
     void ModifySenderBitrateConfig(
         BitrateConstraints* bitrate_config) override {
@@ -445,7 +442,7 @@ TEST_F(StatsEndToEndTest, TestReceivedRtpPacketStats) {
     Action OnSendRtp(const uint8_t* packet, size_t length) override {
       if (sent_rtp_ >= kNumRtpPacketsToSend) {
         VideoReceiveStream::Stats stats = receive_stream_->GetStats();
-        if (kNumRtpPacketsToSend == stats.rtp_stats.transmitted.packets) {
+        if (kNumRtpPacketsToSend == stats.rtp_stats.packet_counter.packets) {
           observation_complete_.Set();
         }
         return DROP_PACKET;
@@ -615,7 +612,8 @@ TEST_F(StatsEndToEndTest, VerifyNackStats) {
     Action OnSendRtp(const uint8_t* packet, size_t length) override {
       rtc::CritScope lock(&crit_);
       if (++sent_rtp_packets_ == kPacketNumberToDrop) {
-        std::unique_ptr<RtpHeaderParser> parser(RtpHeaderParser::Create());
+        std::unique_ptr<RtpHeaderParser> parser(
+            RtpHeaderParser::CreateForTest());
         RTPHeader header;
         EXPECT_TRUE(parser->Parse(packet, length, &header));
         dropped_rtp_packet_ = header.sequenceNumber;
@@ -722,18 +720,18 @@ TEST_F(StatsEndToEndTest, CallReportsRttForSender) {
     BuiltInNetworkBehaviorConfig config;
     config.queue_delay_ms = kSendDelayMs;
     CreateCalls();
-    sender_transport = absl::make_unique<test::DirectTransport>(
+    sender_transport = std::make_unique<test::DirectTransport>(
         &task_queue_,
-        absl::make_unique<FakeNetworkPipe>(
+        std::make_unique<FakeNetworkPipe>(
             Clock::GetRealTimeClock(),
-            absl::make_unique<SimulatedNetwork>(config)),
+            std::make_unique<SimulatedNetwork>(config)),
         sender_call_.get(), payload_type_map_);
     config.queue_delay_ms = kReceiveDelayMs;
-    receiver_transport = absl::make_unique<test::DirectTransport>(
+    receiver_transport = std::make_unique<test::DirectTransport>(
         &task_queue_,
-        absl::make_unique<FakeNetworkPipe>(
+        std::make_unique<FakeNetworkPipe>(
             Clock::GetRealTimeClock(),
-            absl::make_unique<SimulatedNetwork>(config)),
+            std::make_unique<SimulatedNetwork>(config)),
         receiver_call_.get(), payload_type_map_);
     sender_transport->SetReceiver(receiver_call_->Receiver());
     receiver_transport->SetReceiver(sender_call_->Receiver());
@@ -749,7 +747,9 @@ TEST_F(StatsEndToEndTest, CallReportsRttForSender) {
 
   int64_t start_time_ms = clock_->TimeInMilliseconds();
   while (true) {
-    Call::Stats stats = sender_call_->GetStats();
+    Call::Stats stats;
+    task_queue_.SendTask(
+        [this, &stats]() { stats = sender_call_->GetStats(); });
     ASSERT_GE(start_time_ms + kDefaultTimeoutMs, clock_->TimeInMilliseconds())
         << "No RTT stats before timeout!";
     if (stats.rtt_ms != -1) {

@@ -15,7 +15,6 @@
 
 #include "api/video/encoded_image.h"
 #include "api/video/video_timing.h"
-#include "modules/rtp_rtcp/source/rtp_video_header.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/packet.h"
 #include "rtc_base/checks.h"
@@ -77,10 +76,9 @@ bool VCMFrameBuffer::IsSessionComplete() const {
 }
 
 // Insert packet
-VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(
-    const VCMPacket& packet,
-    int64_t timeInMs,
-    const FrameData& frame_data) {
+VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(const VCMPacket& packet,
+                                                int64_t timeInMs,
+                                                const FrameData& frame_data) {
   TRACE_EVENT0("webrtc", "VCMFrameBuffer::InsertPacket");
   assert(!(NULL == packet.dataPtr && packet.sizeBytes > 0));
   if (packet.dataPtr != NULL) {
@@ -147,9 +145,7 @@ VCMFrameBufferEnum VCMFrameBuffer::InsertPacket(
   // frame (I-frame or IDR frame in H.264 (AVC), or an IRAP picture in H.265
   // (HEVC)).
   if (packet.markerBit) {
-    RTC_DCHECK(!_rotation_set);
     rotation_ = packet.video_header.rotation;
-    _rotation_set = true;
     content_type_ = packet.video_header.content_type;
     if (packet.video_header.video_timing.flags != VideoSendTiming::kInvalid) {
       timing_.encode_start_ms =

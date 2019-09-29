@@ -14,7 +14,6 @@
 #include <memory>
 #include <vector>
 
-#include "absl/memory/memory.h"
 #include "api/test/mock_frame_decryptor.h"
 #include "modules/video_coding/packet_buffer.h"
 #include "rtc_base/ref_counted_object.h"
@@ -40,15 +39,6 @@ class FakePacketBuffer : public video_coding::PacketBuffer {
   bool InsertPacket(VCMPacket* packet) override {
     packets_[packet->seqNum] = *packet;
     return true;
-  }
-
-  bool GetBitstream(const video_coding::RtpFrameObject& frame,
-                    uint8_t* destination) override {
-    return true;
-  }
-
-  void ReturnFrame(video_coding::RtpFrameObject* frame) override {
-    packets_.erase(frame->first_seq_num());
   }
 
  private:
@@ -100,33 +90,32 @@ class BufferedFrameDecryptorTest
                                          ? VideoFrameType::kVideoFrameKey
                                          : VideoFrameType::kVideoFrameDelta;
     packet.generic_descriptor = RtpGenericFrameDescriptor();
-    fake_packet_buffer_->InsertPacket(&packet);
+    fake_packet_buffer_.InsertPacket(&packet);
     packet.seqNum = seq_num_;
     packet.video_header.is_last_packet_in_frame = true;
-    fake_packet_buffer_->InsertPacket(&packet);
+    fake_packet_buffer_.InsertPacket(&packet);
 
-    return std::unique_ptr<video_coding::RtpFrameObject>(
-        new video_coding::RtpFrameObject(fake_packet_buffer_.get(), seq_num_,
-                                         seq_num_, 0, 0, 0, 0));
+    return std::make_unique<video_coding::RtpFrameObject>(
+        &fake_packet_buffer_, seq_num_, seq_num_, 0, 0, 0, RtpPacketInfos(),
+        EncodedImageBuffer::Create(/*size=*/0));
   }
 
  protected:
-  BufferedFrameDecryptorTest() : fake_packet_buffer_(new FakePacketBuffer()) {}
-  void SetUp() override {
+  BufferedFrameDecryptorTest() {
     fake_packet_data_ = std::vector<uint8_t>(100);
     decrypted_frame_call_count_ = 0;
     decryption_status_change_count_ = 0;
     seq_num_ = 0;
     mock_frame_decryptor_ = new rtc::RefCountedObject<MockFrameDecryptor>();
     buffered_frame_decryptor_ =
-        absl::make_unique<BufferedFrameDecryptor>(this, this);
+        std::make_unique<BufferedFrameDecryptor>(this, this);
     buffered_frame_decryptor_->SetFrameDecryptor(mock_frame_decryptor_.get());
   }
 
   static const size_t kMaxStashedFrames;
 
   std::vector<uint8_t> fake_packet_data_;
-  rtc::scoped_refptr<FakePacketBuffer> fake_packet_buffer_;
+  FakePacketBuffer fake_packet_buffer_;
   rtc::scoped_refptr<MockFrameDecryptor> mock_frame_decryptor_;
   std::unique_ptr<BufferedFrameDecryptor> buffered_frame_decryptor_;
   size_t decrypted_frame_call_count_;

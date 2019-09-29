@@ -10,17 +10,20 @@
 #include "video/video_quality_test.h"
 
 #include <stdio.h>
+
 #include <algorithm>
 #include <deque>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
-#include "absl/memory/memory.h"
-#include "api/media_transport_config.h"
+#include "api/fec_controller_override.h"
 #include "api/rtc_event_log_output_file.h"
 #include "api/task_queue/default_task_queue_factory.h"
+#include "api/transport/media/media_transport_config.h"
 #include "api/video/builtin_video_bitrate_allocator_factory.h"
+#include "api/video_codecs/video_encoder.h"
 #include "call/fake_network_pipe.h"
 #include "call/simulated_network.h"
 #include "media/engine/adm_helpers.h"
@@ -66,6 +69,8 @@ constexpr uint32_t kThumbnailSendSsrcStart = 0xE0000;
 constexpr uint32_t kThumbnailRtxSsrcStart = 0xF0000;
 
 constexpr int kDefaultMaxQp = cricket::WebRtcVideoChannel::kDefaultQpMax;
+
+const VideoEncoder::Capabilities kCapabilities(false);
 
 std::pair<uint32_t, uint32_t> GetMinMaxBitratesBps(const VideoCodec& codec,
                                                    size_t spatial_idx) {
@@ -131,12 +136,15 @@ class QualityTestVideoEncoder : public VideoEncoder,
   }
 
   // Implement VideoEncoder
+  void SetFecControllerOverride(
+      FecControllerOverride* fec_controller_override) {
+    // Ignored.
+  }
+
   int32_t InitEncode(const VideoCodec* codec_settings,
-                     int32_t number_of_cores,
-                     size_t max_payload_size) override {
+                     const Settings& settings) override {
     codec_settings_ = *codec_settings;
-    return encoder_->InitEncode(codec_settings, number_of_cores,
-                                max_payload_size);
+    return encoder_->InitEncode(codec_settings, settings);
   }
 
   int32_t RegisterEncodeCompleteCallback(
@@ -266,19 +274,19 @@ std::unique_ptr<VideoDecoder> VideoQualityTest::CreateVideoDecoder(
     const SdpVideoFormat& format) {
   std::unique_ptr<VideoDecoder> decoder;
   if (format.name == "multiplex") {
-    decoder = absl::make_unique<MultiplexDecoderAdapter>(
-        &internal_decoder_factory_, SdpVideoFormat(cricket::kVp9CodecName));
+    decoder = std::make_unique<MultiplexDecoderAdapter>(
+        decoder_factory_.get(), SdpVideoFormat(cricket::kVp9CodecName));
   } else if (format.name == "FakeCodec") {
     decoder = webrtc::FakeVideoDecoderFactory::CreateVideoDecoder();
   } else {
-    decoder = internal_decoder_factory_.CreateVideoDecoder(format);
+    decoder = decoder_factory_->CreateVideoDecoder(format);
   }
   if (!params_.logging.encoded_frame_base_path.empty()) {
     rtc::StringBuilder str;
     str << receive_logs_++;
     std::string path =
         params_.logging.encoded_frame_base_path + "." + str.str() + ".recv.ivf";
-    decoder = absl::make_unique<FrameDumpingDecoder>(
+    decoder = CreateFrameDumpingDecoderWrapper(
         std::move(decoder), FileWrapper::OpenWriteOnly(path));
   }
   return decoder;
@@ -289,15 +297,15 @@ std::unique_ptr<VideoEncoder> VideoQualityTest::CreateVideoEncoder(
     VideoAnalyzer* analyzer) {
   std::unique_ptr<VideoEncoder> encoder;
   if (format.name == "VP8") {
-    encoder = absl::make_unique<EncoderSimulcastProxy>(
-        &internal_encoder_factory_, format);
+    encoder =
+        std::make_unique<EncoderSimulcastProxy>(encoder_factory_.get(), format);
   } else if (format.name == "multiplex") {
-    encoder = absl::make_unique<MultiplexEncoderAdapter>(
-        &internal_encoder_factory_, SdpVideoFormat(cricket::kVp9CodecName));
+    encoder = std::make_unique<MultiplexEncoderAdapter>(
+        encoder_factory_.get(), SdpVideoFormat(cricket::kVp9CodecName));
   } else if (format.name == "FakeCodec") {
     encoder = webrtc::FakeVideoEncoderFactory::CreateVideoEncoder();
   } else {
-    encoder = internal_encoder_factory_.CreateVideoEncoder(format);
+    encoder = encoder_factory_->CreateVideoEncoder(format);
   }
 
   std::vector<FileWrapper> encoded_frame_dump_files;
@@ -332,7 +340,7 @@ std::unique_ptr<VideoEncoder> VideoQualityTest::CreateVideoEncoder(
   }
 
   if (analyzer || !encoded_frame_dump_files.empty() || overshoot_factor > 1.0) {
-    encoder = absl::make_unique<QualityTestVideoEncoder>(
+    encoder = std::make_unique<QualityTestVideoEncoder>(
         std::move(encoder), analyzer, std::move(encoded_frame_dump_files),
         overshoot_factor);
   }
@@ -362,7 +370,17 @@ VideoQualityTest::VideoQualityTest(
       injection_components_(std::move(injection_components)),
       num_video_streams_(0) {
   if (injection_components_ == nullptr) {
-    injection_components_ = absl::make_unique<InjectionComponents>();
+    injection_components_ = std::make_unique<InjectionComponents>();
+  }
+  if (injection_components_->video_decoder_factory != nullptr) {
+    decoder_factory_ = std::move(injection_components_->video_decoder_factory);
+  } else {
+    decoder_factory_ = std::make_unique<InternalDecoderFactory>();
+  }
+  if (injection_components_->video_encoder_factory != nullptr) {
+    encoder_factory_ = std::move(injection_components_->video_encoder_factory);
+  } else {
+    encoder_factory_ = std::make_unique<InternalEncoderFactory>();
   }
 
   payload_type_map_ = test::CallTest::payload_type_map_;
@@ -372,9 +390,12 @@ VideoQualityTest::VideoQualityTest(
              payload_type_map_.end());
   RTC_DCHECK(payload_type_map_.find(kPayloadTypeVP9) ==
              payload_type_map_.end());
+  RTC_DCHECK(payload_type_map_.find(kPayloadTypeGeneric) ==
+             payload_type_map_.end());
   payload_type_map_[kPayloadTypeH264] = webrtc::MediaType::VIDEO;
   payload_type_map_[kPayloadTypeVP8] = webrtc::MediaType::VIDEO;
   payload_type_map_[kPayloadTypeVP9] = webrtc::MediaType::VIDEO;
+  payload_type_map_[kPayloadTypeGeneric] = webrtc::MediaType::VIDEO;
 
   fec_controller_factory_ =
       std::move(injection_components_->fec_controller_factory);
@@ -459,7 +480,7 @@ std::string VideoQualityTest::GenerateGraphTitle() const {
 
 void VideoQualityTest::CheckParamsAndInjectionComponents() {
   if (injection_components_ == nullptr) {
-    injection_components_ = absl::make_unique<InjectionComponents>();
+    injection_components_ = std::make_unique<InjectionComponents>();
   }
   if (!params_.config && injection_components_->sender_network == nullptr &&
       injection_components_->receiver_network == nullptr) {
@@ -705,6 +726,7 @@ void VideoQualityTest::SetupVideo(Transport* send_transport,
   size_t num_video_substreams = params_.ss[0].streams.size();
   RTC_CHECK(num_video_streams_ > 0);
   video_encoder_configs_.resize(num_video_streams_);
+  std::string generic_codec_name;
   for (size_t video_idx = 0; video_idx < num_video_streams_; ++video_idx) {
     video_send_configs_.push_back(VideoSendStream::Config(send_transport));
     video_encoder_configs_.push_back(VideoEncoderConfig());
@@ -726,8 +748,13 @@ void VideoQualityTest::SetupVideo(Transport* send_transport,
     } else if (params_.video[video_idx].codec == "FakeCodec") {
       payload_type = kFakeVideoSendPayloadType;
     } else {
-      RTC_NOTREACHED() << "Codec not supported!";
-      return;
+      RTC_CHECK(generic_codec_name.empty() ||
+                generic_codec_name == params_.video[video_idx].codec)
+          << "Supplying multiple generic codecs is unsupported.";
+      RTC_LOG(LS_INFO) << "Treating codec " << params_.video[video_idx].codec
+                       << " as generic.";
+      payload_type = kPayloadTypeGeneric;
+      generic_codec_name = params_.video[video_idx].codec;
     }
     video_send_configs_[video_idx].encoder_settings.encoder_factory =
         (video_idx == 0) ? &video_encoder_factory_with_analyzer_
@@ -1019,7 +1046,7 @@ void VideoQualityTest::SetupThumbnailCapturers(size_t num_thumbnail_streams) {
   VideoStream thumbnail = DefaultThumbnailStream();
   for (size_t i = 0; i < num_thumbnail_streams; ++i) {
     auto frame_generator_capturer =
-        absl::make_unique<test::FrameGeneratorCapturer>(
+        std::make_unique<test::FrameGeneratorCapturer>(
             clock_,
             test::FrameGenerator::CreateSquareGenerator(
                 static_cast<int>(thumbnail.width),
@@ -1093,12 +1120,12 @@ void VideoQualityTest::CreateCapturers() {
       frame_generator = test::FrameGenerator::CreateSquareGenerator(
           static_cast<int>(params_.video[video_idx].width),
           static_cast<int>(params_.video[video_idx].height),
-          test::FrameGenerator::OutputType::I420A, absl::nullopt);
+          test::FrameGenerator::OutputType::kI420A, absl::nullopt);
     } else if (params_.video[video_idx].clip_path == "GeneratorI010") {
       frame_generator = test::FrameGenerator::CreateSquareGenerator(
           static_cast<int>(params_.video[video_idx].width),
           static_cast<int>(params_.video[video_idx].height),
-          test::FrameGenerator::OutputType::I010, absl::nullopt);
+          test::FrameGenerator::OutputType::kI010, absl::nullopt);
     } else if (params_.video[video_idx].clip_path.empty()) {
       video_sources_[video_idx] = test::CreateVideoCapturer(
           params_.video[video_idx].width, params_.video[video_idx].height,
@@ -1123,7 +1150,7 @@ void VideoQualityTest::CreateCapturers() {
     }
     ASSERT_TRUE(frame_generator);
     auto frame_generator_capturer =
-        absl::make_unique<test::FrameGeneratorCapturer>(
+        std::make_unique<test::FrameGeneratorCapturer>(
             clock_, std::move(frame_generator), params_.video[video_idx].fps,
             *task_queue_factory_);
     EXPECT_TRUE(frame_generator_capturer->Init());
@@ -1155,13 +1182,13 @@ std::unique_ptr<test::LayerFilteringTransport>
 VideoQualityTest::CreateSendTransport() {
   std::unique_ptr<NetworkBehaviorInterface> network_behavior = nullptr;
   if (injection_components_->sender_network == nullptr) {
-    network_behavior = absl::make_unique<SimulatedNetwork>(*params_.config);
+    network_behavior = std::make_unique<SimulatedNetwork>(*params_.config);
   } else {
     network_behavior = std::move(injection_components_->sender_network);
   }
-  return absl::make_unique<test::LayerFilteringTransport>(
+  return std::make_unique<test::LayerFilteringTransport>(
       &task_queue_,
-      absl::make_unique<FakeNetworkPipe>(clock_, std::move(network_behavior)),
+      std::make_unique<FakeNetworkPipe>(clock_, std::move(network_behavior)),
       sender_call_.get(), kPayloadTypeVP8, kPayloadTypeVP9,
       params_.video[0].selected_tl, params_.ss[0].selected_sl,
       payload_type_map_, kVideoSendSsrcs[0],
@@ -1173,13 +1200,13 @@ std::unique_ptr<test::DirectTransport>
 VideoQualityTest::CreateReceiveTransport() {
   std::unique_ptr<NetworkBehaviorInterface> network_behavior = nullptr;
   if (injection_components_->receiver_network == nullptr) {
-    network_behavior = absl::make_unique<SimulatedNetwork>(*params_.config);
+    network_behavior = std::make_unique<SimulatedNetwork>(*params_.config);
   } else {
     network_behavior = std::move(injection_components_->receiver_network);
   }
-  return absl::make_unique<test::DirectTransport>(
+  return std::make_unique<test::DirectTransport>(
       &task_queue_,
-      absl::make_unique<FakeNetworkPipe>(clock_, std::move(network_behavior)),
+      std::make_unique<FakeNetworkPipe>(clock_, std::move(network_behavior)),
       receiver_call_.get(), payload_type_map_);
 }
 
@@ -1208,11 +1235,11 @@ void VideoQualityTest::RunWithAnalyzer(const Params& params) {
     recv_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
         RtcEventLog::EncodingType::Legacy);
     std::unique_ptr<RtcEventLogOutputFile> send_output(
-        absl::make_unique<RtcEventLogOutputFile>(
+        std::make_unique<RtcEventLogOutputFile>(
             params.logging.rtc_event_log_name + "_send",
             RtcEventLog::kUnlimitedOutput));
     std::unique_ptr<RtcEventLogOutputFile> recv_output(
-        absl::make_unique<RtcEventLogOutputFile>(
+        std::make_unique<RtcEventLogOutputFile>(
             params.logging.rtc_event_log_name + "_recv",
             RtcEventLog::kUnlimitedOutput));
     bool event_log_started =
@@ -1222,8 +1249,8 @@ void VideoQualityTest::RunWithAnalyzer(const Params& params) {
                                       RtcEventLog::kImmediateOutput);
     RTC_DCHECK(event_log_started);
   } else {
-    send_event_log_ = absl::make_unique<RtcEventLogNull>();
-    recv_event_log_ = absl::make_unique<RtcEventLogNull>();
+    send_event_log_ = std::make_unique<RtcEventLogNull>();
+    recv_event_log_ = std::make_unique<RtcEventLogNull>();
   }
 
   task_queue_.SendTask([this, &params, &send_transport, &recv_transport]() {
@@ -1244,7 +1271,7 @@ void VideoQualityTest::RunWithAnalyzer(const Params& params) {
   if (graph_title.empty())
     graph_title = VideoQualityTest::GenerateGraphTitle();
   bool is_quick_test_enabled = field_trial::IsEnabled("WebRTC-QuickPerfTest");
-  analyzer_ = absl::make_unique<VideoAnalyzer>(
+  analyzer_ = std::make_unique<VideoAnalyzer>(
       send_transport.get(), params_.analyzer.test_label,
       params_.analyzer.avg_psnr_threshold, params_.analyzer.avg_ssim_threshold,
       is_quick_test_enabled
@@ -1331,7 +1358,7 @@ rtc::scoped_refptr<AudioDeviceModule> VideoQualityTest::CreateAudioDevice() {
   // CO_E_NOTINITIALIZED otherwise. The legacy ADM for Windows used internal
   // COM initialization but the new ADM requires COM to be initialized
   // externally.
-  com_initializer_ = absl::make_unique<webrtc_win::ScopedCOMInitializer>(
+  com_initializer_ = std::make_unique<webrtc_win::ScopedCOMInitializer>(
       webrtc_win::ScopedCOMInitializer::kMTA);
   RTC_CHECK(com_initializer_->Succeeded());
   RTC_CHECK(webrtc_win::core_audio_utility::IsSupported());
@@ -1354,7 +1381,8 @@ void VideoQualityTest::InitializeAudioDevice(Call::Config* send_call_config,
     audio_device = CreateAudioDevice();
   } else {
     // By default, create a test ADM which fakes audio.
-    audio_device = TestAudioDeviceModule::CreateTestAudioDeviceModule(
+    audio_device = TestAudioDeviceModule::Create(
+        task_queue_factory_.get(),
         TestAudioDeviceModule::CreatePulsedNoiseCapturer(32000, 48000),
         TestAudioDeviceModule::CreateDiscardRenderer(48000), 1.f);
   }
@@ -1429,11 +1457,11 @@ void VideoQualityTest::RunWithRenderers(const Params& params) {
     recv_event_log_ = rtc_event_log_factory_.CreateRtcEventLog(
         RtcEventLog::EncodingType::Legacy);
     std::unique_ptr<RtcEventLogOutputFile> send_output(
-        absl::make_unique<RtcEventLogOutputFile>(
+        std::make_unique<RtcEventLogOutputFile>(
             params.logging.rtc_event_log_name + "_send",
             RtcEventLog::kUnlimitedOutput));
     std::unique_ptr<RtcEventLogOutputFile> recv_output(
-        absl::make_unique<RtcEventLogOutputFile>(
+        std::make_unique<RtcEventLogOutputFile>(
             params.logging.rtc_event_log_name + "_recv",
             RtcEventLog::kUnlimitedOutput));
     bool event_log_started =
@@ -1443,8 +1471,8 @@ void VideoQualityTest::RunWithRenderers(const Params& params) {
                                       /*output_period_ms=*/5000);
     RTC_DCHECK(event_log_started);
   } else {
-    send_event_log_ = absl::make_unique<RtcEventLogNull>();
-    recv_event_log_ = absl::make_unique<RtcEventLogNull>();
+    send_event_log_ = std::make_unique<RtcEventLogNull>();
+    recv_event_log_ = std::make_unique<RtcEventLogNull>();
   }
 
   task_queue_.SendTask([&]() {

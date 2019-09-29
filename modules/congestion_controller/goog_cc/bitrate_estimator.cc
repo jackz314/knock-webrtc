@@ -11,6 +11,7 @@
 #include "modules/congestion_controller/goog_cc/bitrate_estimator.h"
 
 #include <stdio.h>
+
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -42,6 +43,7 @@ BitrateEstimator::BitrateEstimator(const WebRtcKeyValueConfig* key_value_config)
                             kMinRateWindowMs,
                             kMaxRateWindowMs),
       uncertainty_scale_("scale", 10.0),
+      uncertainty_scale_in_alr_("scale_alr", 10.0),
       uncertainty_symmetry_cap_("symmetry_cap", DataRate::Zero()),
       estimate_floor_("floor", DataRate::Zero()),
       current_window_ms_(0),
@@ -49,21 +51,22 @@ BitrateEstimator::BitrateEstimator(const WebRtcKeyValueConfig* key_value_config)
       bitrate_estimate_kbps_(-1.0f),
       bitrate_estimate_var_(50.0f) {
   // E.g WebRTC-BweThroughputWindowConfig/initial_window_ms:350,window_ms:250/
-  ParseFieldTrial(
-      {&initial_window_ms_, &noninitial_window_ms_, &uncertainty_scale_,
-       &uncertainty_symmetry_cap_, &estimate_floor_},
-      key_value_config->Lookup(kBweThroughputWindowConfig));
+  ParseFieldTrial({&initial_window_ms_, &noninitial_window_ms_,
+                   &uncertainty_scale_, &uncertainty_scale_in_alr_,
+                   &uncertainty_symmetry_cap_, &estimate_floor_},
+                  key_value_config->Lookup(kBweThroughputWindowConfig));
 }
 
 BitrateEstimator::~BitrateEstimator() = default;
 
-void BitrateEstimator::Update(int64_t now_ms, int bytes) {
+void BitrateEstimator::Update(Timestamp at_time, DataSize amount, bool in_alr) {
   int rate_window_ms = noninitial_window_ms_.Get();
   // We use a larger window at the beginning to get a more stable sample that
   // we can use to initialize the estimate.
   if (bitrate_estimate_kbps_ < 0.f)
     rate_window_ms = initial_window_ms_.Get();
-  float bitrate_sample_kbps = UpdateWindow(now_ms, bytes, rate_window_ms);
+  float bitrate_sample_kbps =
+      UpdateWindow(at_time.ms(), amount.bytes(), rate_window_ms);
   if (bitrate_sample_kbps < 0.0f)
     return;
   if (bitrate_estimate_kbps_ < 0.0f) {
@@ -75,9 +78,13 @@ void BitrateEstimator::Update(int64_t now_ms, int bytes) {
   // current estimate. With low values of uncertainty_symmetry_cap_ we add more
   // uncertainty to increases than to decreases. For higher values we approach
   // symmetry.
+  float scale = uncertainty_scale_;
+  if (in_alr && bitrate_sample_kbps < bitrate_estimate_kbps_) {
+    // Optionally use higher uncertainty for samples obtained during ALR.
+    scale = uncertainty_scale_in_alr_;
+  }
   float sample_uncertainty =
-      uncertainty_scale_ *
-      std::abs(bitrate_estimate_kbps_ - bitrate_sample_kbps) /
+      scale * std::abs(bitrate_estimate_kbps_ - bitrate_sample_kbps) /
       (bitrate_estimate_kbps_ +
        std::min(bitrate_sample_kbps,
                 uncertainty_symmetry_cap_.Get().kbps<float>()));
@@ -95,7 +102,7 @@ void BitrateEstimator::Update(int64_t now_ms, int bytes) {
       std::max(bitrate_estimate_kbps_, estimate_floor_.Get().kbps<float>());
   bitrate_estimate_var_ = sample_var * pred_bitrate_estimate_var /
                           (sample_var + pred_bitrate_estimate_var);
-  BWE_TEST_LOGGING_PLOT(1, "acknowledged_bitrate", now_ms,
+  BWE_TEST_LOGGING_PLOT(1, "acknowledged_bitrate", at_time.ms(),
                         bitrate_estimate_kbps_ * 1000);
 }
 
@@ -127,15 +134,15 @@ float BitrateEstimator::UpdateWindow(int64_t now_ms,
   return bitrate_sample;
 }
 
-absl::optional<uint32_t> BitrateEstimator::bitrate_bps() const {
+absl::optional<DataRate> BitrateEstimator::bitrate() const {
   if (bitrate_estimate_kbps_ < 0.f)
     return absl::nullopt;
-  return bitrate_estimate_kbps_ * 1000;
+  return DataRate::kbps(bitrate_estimate_kbps_);
 }
 
-absl::optional<uint32_t> BitrateEstimator::PeekBps() const {
+absl::optional<DataRate> BitrateEstimator::PeekRate() const {
   if (current_window_ms_ > 0)
-    return sum_ * 8000 / current_window_ms_;
+    return DataSize::bytes(sum_) / TimeDelta::ms(current_window_ms_);
   return absl::nullopt;
 }
 
