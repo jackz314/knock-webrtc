@@ -36,7 +36,7 @@ deploy:
     branch: knock-branch
   api_key:
     secure: "NDxiqck5a7X+Xq0QdOjOXT90HvRNXZxQRGcuufya+EwOGLcht/8SP+WFsPbu6P++icLBdQSZhmGSmaywaV6EWBNxoOtDrTlbLuD+YMl8CKbOOykx6hd8W2QAowYuudP9fZfWJsO7S3aiAWnBKak8et6uyjcTUjj82nP47bzG7p3BPYPrgx5BDL7XPeXzbWyp33dmWRio/zw9qJn2kKwB1lZBTyuRODCdrKiWTpA+H7QqvBhQcDQzMgf6Ooy5S4wEvl2nQZAORJ1LTHNB4e/FL4e0jon6covN0Q1aXOarphWkeDh3vVYDpMG9cyRCScYvL7GZ1yWyfwzWBdBKr1zYHDkCPMTUmgKQfl0pTL8t/M5nsz6TYSbjIbXyJyMo8fM0RI9Rjmq+jjiX+adFj85m+Za/N3OejauH5qrAMbpQTq+e0e6RD5i2DiQ0fRqEjaFQ9cmaGZcwGCG+H2LWQFYN25KHzkt4QqaE8D8RhrtGmfhXTvZz4CnIvpO+w+OVJwX5k/G8APKy3bMbtlQrovnvqRDaDlzMZM/z7/wTqknmi7Oj+TbsYBIwG2Wc4pzGKYyRPM0tTMqGO0hUCA398VRwPWnd9xLKGPUpWBkb1oB8JTGkzFuKtmCxBZceuFwekXmntX9j4cMbxxVCV0sYeV1bJdujbFdma3fWuyuly2K1NSc="
-  file: libwebrtc.aar    
+  file: lib-knock-webrtc.aar    
   skip_cleanup: true
 notifications:
   email:
