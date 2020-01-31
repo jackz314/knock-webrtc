@@ -11,7 +11,6 @@
 package org.webrtc;
 
 import android.annotation.TargetApi;
-import android.graphics.Matrix;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -21,7 +20,6 @@ import android.support.annotation.Nullable;
 import android.view.Surface;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.Deque;
 import java.util.Map;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -588,7 +586,14 @@ class HardwareVideoEncoder implements VideoEncoder {
         EncodedImage encodedImage = builder
                                         .setBuffer(frameBuffer,
                                             () -> {
-                                              codec.releaseOutputBuffer(index, false);
+                                              // This callback should not throw any exceptions since
+                                              // it may be called on an arbitrary thread.
+                                              // Check bug webrtc:11230 for more details.
+                                              try {
+                                                codec.releaseOutputBuffer(index, false);
+                                              } catch (Exception e) {
+                                                Logging.e(TAG, "releaseOutputBuffer failed", e);
+                                              }
                                               outputBuffersBusyCount.decrement();
                                             })
                                         .setFrameType(frameType)

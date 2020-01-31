@@ -54,6 +54,7 @@
 #include "test/mock_audio_decoder.h"
 #include "test/mock_audio_encoder.h"
 #include "test/testsupport/file_utils.h"
+#include "test/testsupport/rtc_expect_death.h"
 
 using ::testing::_;
 using ::testing::AtLeast;
@@ -110,7 +111,8 @@ class PacketizationCallbackStubOldApi : public AudioPacketizationCallback {
                    uint8_t payload_type,
                    uint32_t timestamp,
                    const uint8_t* payload_data,
-                   size_t payload_len_bytes) override {
+                   size_t payload_len_bytes,
+                   int64_t absolute_capture_timestamp_ms) override {
     rtc::CritScope lock(&crit_sect_);
     ++num_calls_;
     last_frame_type_ = frame_type;
@@ -272,8 +274,8 @@ TEST_F(AudioCodingModuleTestOldApi, VerifyOutputFrame) {
 TEST_F(AudioCodingModuleTestOldApi, FailOnZeroDesiredFrequency) {
   AudioFrame audio_frame;
   bool muted;
-  EXPECT_DEATH(acm_->PlayoutData10Ms(0, &audio_frame, &muted),
-               "dst_sample_rate_hz");
+  RTC_EXPECT_DEATH(acm_->PlayoutData10Ms(0, &audio_frame, &muted),
+                   "dst_sample_rate_hz");
 }
 #endif
 
@@ -1453,13 +1455,15 @@ const std::string payload_checksum =
         "27fef7b799393347ec3b5694369a1c36");
 }  // namespace
 
-TEST_F(AcmSenderBitExactnessOldApi, Opus_stereo_20ms) {
+// TODO(webrtc:11325) Reenable after Opus has been upgraded to 1.3.
+TEST_F(AcmSenderBitExactnessOldApi, DISABLED_Opus_stereo_20ms) {
   ASSERT_NO_FATAL_FAILURE(SetUpTest("opus", 48000, 2, 120, 960, 960));
   Run(audio_checksum, payload_checksum, 50,
       test::AcmReceiveTestOldApi::kStereoOutput);
 }
 
-TEST_F(AcmSenderBitExactnessNewApi, MAYBE_OpusFromFormat_stereo_20ms) {
+// TODO(webrtc:11325) Reenable after Opus has been upgraded to 1.3.
+TEST_F(AcmSenderBitExactnessNewApi, DISABLED_OpusFromFormat_stereo_20ms) {
   const auto config = AudioEncoderOpus::SdpToConfig(
       SdpAudioFormat("opus", 48000, 2, {{"stereo", "1"}}));
   ASSERT_TRUE(SetUpSender(kTestFileFakeStereo32kHz, 32000));
@@ -1516,7 +1520,8 @@ TEST_F(AcmSenderBitExactnessNewApi, DISABLED_OpusManyChannels) {
       50, test::AcmReceiveTestOldApi::kQuadOutput, decoder_factory);
 }
 
-TEST_F(AcmSenderBitExactnessNewApi, OpusFromFormat_stereo_20ms_voip) {
+// TODO(webrtc:11325) Reenable after Opus has been upgraded to 1.3.
+TEST_F(AcmSenderBitExactnessNewApi, DISABLED_OpusFromFormat_stereo_20ms_voip) {
   auto config = AudioEncoderOpus::SdpToConfig(
       SdpAudioFormat("opus", 48000, 2, {{"stereo", "1"}}));
   // If not set, default will be kAudio in case of stereo.
@@ -1616,7 +1621,8 @@ class AcmSetBitRateNewApi : public AcmSetBitRateTest {
   }
 };
 
-TEST_F(AcmSetBitRateNewApi, OpusFromFormat_48khz_20ms_10kbps) {
+// TODO(webrtc:11325) Reenable after Opus has been upgraded to 1.3.
+TEST_F(AcmSetBitRateNewApi, DISABLED_OpusFromFormat_48khz_20ms_10kbps) {
   const auto config = AudioEncoderOpus::SdpToConfig(
       SdpAudioFormat("opus", 48000, 2, {{"maxaveragebitrate", "10000"}}));
   ASSERT_TRUE(SetUpSender());
@@ -1625,13 +1631,104 @@ TEST_F(AcmSetBitRateNewApi, OpusFromFormat_48khz_20ms_10kbps) {
   RunInner(8000, 12000);
 }
 
-TEST_F(AcmSetBitRateNewApi, OpusFromFormat_48khz_20ms_50kbps) {
+// TODO(webrtc:11325) Reenable after Opus has been upgraded to 1.3.
+TEST_F(AcmSetBitRateNewApi, DISABLED_OpusFromFormat_48khz_20ms_50kbps) {
   const auto config = AudioEncoderOpus::SdpToConfig(
       SdpAudioFormat("opus", 48000, 2, {{"maxaveragebitrate", "50000"}}));
   ASSERT_TRUE(SetUpSender());
   RegisterExternalSendCodec(AudioEncoderOpus::MakeAudioEncoder(*config, 107),
                             107);
   RunInner(40000, 60000);
+}
+
+// Verify that it works when the data to send is mono and the encoder is set to
+// send surround audio.
+TEST_F(AudioCodingModuleTestOldApi, SendingMultiChannelForMonoInput) {
+  constexpr int kSampleRateHz = 48000;
+  constexpr int kSamplesPerChannel = kSampleRateHz * 10 / 1000;
+
+  audio_format_ = SdpAudioFormat({"multiopus",
+                                  kSampleRateHz,
+                                  6,
+                                  {{"minptime", "10"},
+                                   {"useinbandfec", "1"},
+                                   {"channel_mapping", "0,4,1,2,3,5"},
+                                   {"num_streams", "4"},
+                                   {"coupled_streams", "2"}}});
+
+  RegisterCodec();
+
+  input_frame_.sample_rate_hz_ = kSampleRateHz;
+  input_frame_.num_channels_ = 1;
+  input_frame_.samples_per_channel_ = kSamplesPerChannel;
+  for (size_t k = 0; k < 10; ++k) {
+    ASSERT_GE(acm_->Add10MsData(input_frame_), 0);
+    input_frame_.timestamp_ += kSamplesPerChannel;
+  }
+}
+
+// Verify that it works when the data to send is stereo and the encoder is set
+// to send surround audio.
+TEST_F(AudioCodingModuleTestOldApi, SendingMultiChannelForStereoInput) {
+  constexpr int kSampleRateHz = 48000;
+  constexpr int kSamplesPerChannel = (kSampleRateHz * 10) / 1000;
+
+  audio_format_ = SdpAudioFormat({"multiopus",
+                                  kSampleRateHz,
+                                  6,
+                                  {{"minptime", "10"},
+                                   {"useinbandfec", "1"},
+                                   {"channel_mapping", "0,4,1,2,3,5"},
+                                   {"num_streams", "4"},
+                                   {"coupled_streams", "2"}}});
+
+  RegisterCodec();
+
+  input_frame_.sample_rate_hz_ = kSampleRateHz;
+  input_frame_.num_channels_ = 2;
+  input_frame_.samples_per_channel_ = kSamplesPerChannel;
+  for (size_t k = 0; k < 10; ++k) {
+    ASSERT_GE(acm_->Add10MsData(input_frame_), 0);
+    input_frame_.timestamp_ += kSamplesPerChannel;
+  }
+}
+
+// Verify that it works when the data to send is mono and the encoder is set to
+// send stereo audio.
+TEST_F(AudioCodingModuleTestOldApi, SendingStereoForMonoInput) {
+  constexpr int kSampleRateHz = 48000;
+  constexpr int kSamplesPerChannel = (kSampleRateHz * 10) / 1000;
+
+  audio_format_ = SdpAudioFormat("L16", kSampleRateHz, 2);
+
+  RegisterCodec();
+
+  input_frame_.sample_rate_hz_ = kSampleRateHz;
+  input_frame_.num_channels_ = 1;
+  input_frame_.samples_per_channel_ = kSamplesPerChannel;
+  for (size_t k = 0; k < 10; ++k) {
+    ASSERT_GE(acm_->Add10MsData(input_frame_), 0);
+    input_frame_.timestamp_ += kSamplesPerChannel;
+  }
+}
+
+// Verify that it works when the data to send is stereo and the encoder is set
+// to send mono audio.
+TEST_F(AudioCodingModuleTestOldApi, SendingMonoForStereoInput) {
+  constexpr int kSampleRateHz = 48000;
+  constexpr int kSamplesPerChannel = (kSampleRateHz * 10) / 1000;
+
+  audio_format_ = SdpAudioFormat("L16", kSampleRateHz, 1);
+
+  RegisterCodec();
+
+  input_frame_.sample_rate_hz_ = kSampleRateHz;
+  input_frame_.num_channels_ = 1;
+  input_frame_.samples_per_channel_ = kSamplesPerChannel;
+  for (size_t k = 0; k < 10; ++k) {
+    ASSERT_GE(acm_->Add10MsData(input_frame_), 0);
+    input_frame_.timestamp_ += kSamplesPerChannel;
+  }
 }
 
 // The result on the Android platforms is inconsistent for this test case.
@@ -1643,7 +1740,8 @@ TEST_F(AcmSetBitRateNewApi, OpusFromFormat_48khz_20ms_50kbps) {
 #define MAYBE_OpusFromFormat_48khz_20ms_100kbps \
   OpusFromFormat_48khz_20ms_100kbps
 #endif
-TEST_F(AcmSetBitRateNewApi, MAYBE_OpusFromFormat_48khz_20ms_100kbps) {
+// TODO(webrtc:11325) Reenable after Opus has been upgraded to 1.3.
+TEST_F(AcmSetBitRateNewApi, DISABLED_OpusFromFormat_48khz_20ms_100kbps) {
   const auto config = AudioEncoderOpus::SdpToConfig(
       SdpAudioFormat("opus", 48000, 2, {{"maxaveragebitrate", "100000"}}));
   ASSERT_TRUE(SetUpSender());

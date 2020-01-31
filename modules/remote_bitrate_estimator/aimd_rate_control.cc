@@ -40,6 +40,11 @@ bool IsEnabled(const WebRtcKeyValueConfig& field_trials,
   return field_trials.Lookup(key).find("Enabled") == 0;
 }
 
+bool IsNotDisabled(const WebRtcKeyValueConfig& field_trials,
+                   absl::string_view key) {
+  return field_trials.Lookup(key).find("Disabled") != 0;
+}
+
 double ReadBackoffFactor(const WebRtcKeyValueConfig& key_value_config) {
   std::string experiment_string =
       key_value_config.Lookup(kBweBackOffFactorExperiment);
@@ -90,26 +95,26 @@ AimdRateControl::AimdRateControl(const WebRtcKeyValueConfig* key_value_config,
       smoothing_experiment_(
           IsEnabled(*key_value_config, "WebRTC-Audio-BandwidthSmoothing")),
       estimate_bounded_backoff_(
-          IsEnabled(*key_value_config, "WebRTC-Bwe-EstimateBoundedBackoff")),
+          IsNotDisabled(*key_value_config,
+                        "WebRTC-Bwe-EstimateBoundedBackoff")),
       estimate_bounded_increase_(
-          IsEnabled(*key_value_config, "WebRTC-Bwe-EstimateBoundedIncrease")),
+          IsNotDisabled(*key_value_config,
+                        "WebRTC-Bwe-EstimateBoundedIncrease")),
       initial_backoff_interval_("initial_backoff_interval"),
       low_throughput_threshold_("low_throughput", DataRate::Zero()),
-      capacity_deviation_ratio_threshold_("cap_thr", 0.2),
-      capacity_limit_deviation_factor_("cap_lim", 1) {
+      link_capacity_fix_("link_capacity_fix") {
   // E.g
   // WebRTC-BweAimdRateControlConfig/initial_backoff_interval:100ms,
   // low_throughput:50kbps/
-  ParseFieldTrial({&initial_backoff_interval_, &low_throughput_threshold_},
+  ParseFieldTrial({&initial_backoff_interval_, &low_throughput_threshold_,
+                   &link_capacity_fix_},
                   key_value_config->Lookup("WebRTC-BweAimdRateControlConfig"));
   if (initial_backoff_interval_) {
     RTC_LOG(LS_INFO) << "Using aimd rate control with initial back-off interval"
-                     << " " << ToString(*initial_backoff_interval_) << ".";
+                        " "
+                     << ToString(*initial_backoff_interval_) << ".";
   }
   RTC_LOG(LS_INFO) << "Using aimd rate control with back off factor " << beta_;
-  ParseFieldTrial(
-      {&capacity_deviation_ratio_threshold_, &capacity_limit_deviation_factor_},
-      key_value_config->Lookup("WebRTC-Bwe-AimdRateControl-NetworkState"));
 }
 
 AimdRateControl::~AimdRateControl() {}
@@ -306,18 +311,14 @@ DataRate AimdRateControl::ChangeBitrate(DataRate new_bitrate,
       break;
 
     case kRcDecrease:
-      // TODO(srte): Remove when |estimate_bounded_backoff_| has been validated.
-      if (network_estimate_ && capacity_deviation_ratio_threshold_ &&
-          !estimate_bounded_backoff_) {
-        estimated_throughput = std::max(estimated_throughput,
-                                        network_estimate_->link_capacity_lower);
-      }
       if (estimated_throughput > low_throughput_threshold_) {
         // Set bit rate to something slightly lower than the measured throughput
         // to get rid of any self-induced delay.
         new_bitrate = estimated_throughput * beta_;
-        if (new_bitrate > current_bitrate_) {
-          // Avoid increasing the rate when over-using.
+        if (new_bitrate > current_bitrate_ && !link_capacity_fix_) {
+          // TODO(terelius): The link_capacity estimate may be based on old
+          // throughput measurements. Relying on them may lead to unnecessary
+          // BWE drops.
           if (link_capacity_.has_estimate()) {
             new_bitrate = beta_ * link_capacity_.estimate();
           }
@@ -333,6 +334,7 @@ DataRate AimdRateControl::ChangeBitrate(DataRate new_bitrate,
         }
         new_bitrate = std::min(new_bitrate, low_throughput_threshold_.Get());
       }
+      // Avoid increasing the rate when over-using.
       new_bitrate = std::min(new_bitrate, current_bitrate_);
 
       if (bitrate_is_initialized_ && estimated_throughput < current_bitrate_) {
@@ -384,8 +386,7 @@ DataRate AimdRateControl::ClampBitrate(DataRate new_bitrate,
     }
   }
 
-  if (network_estimate_ &&
-      (estimate_bounded_increase_ || capacity_limit_deviation_factor_)) {
+  if (estimate_bounded_increase_ && network_estimate_) {
     DataRate upper_bound = network_estimate_->link_capacity_upper;
     new_bitrate = std::min(new_bitrate, upper_bound);
   }

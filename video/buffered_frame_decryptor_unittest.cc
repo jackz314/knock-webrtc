@@ -26,25 +26,6 @@ using ::testing::Return;
 namespace webrtc {
 namespace {
 
-class FakePacketBuffer : public video_coding::PacketBuffer {
- public:
-  FakePacketBuffer() : PacketBuffer(nullptr, 0, 0, nullptr) {}
-  ~FakePacketBuffer() override {}
-
-  VCMPacket* GetPacket(uint16_t seq_num) override {
-    auto packet_it = packets_.find(seq_num);
-    return packet_it == packets_.end() ? nullptr : &packet_it->second;
-  }
-
-  bool InsertPacket(VCMPacket* packet) override {
-    packets_[packet->seqNum] = *packet;
-    return true;
-  }
-
- private:
-  std::map<uint16_t, VCMPacket> packets_;
-};
-
 FrameDecryptorInterface::Result DecryptSuccess() {
   return FrameDecryptorInterface::Result(FrameDecryptorInterface::Status::kOk,
                                          0);
@@ -57,11 +38,9 @@ FrameDecryptorInterface::Result DecryptFail() {
 
 }  // namespace
 
-class BufferedFrameDecryptorTest
-    : public ::testing::Test,
-      public OnDecryptedFrameCallback,
-      public OnDecryptionStatusChangeCallback,
-      public video_coding::OnAssembledFrameCallback {
+class BufferedFrameDecryptorTest : public ::testing::Test,
+                                   public OnDecryptedFrameCallback,
+                                   public OnDecryptionStatusChangeCallback {
  public:
   // Implements the OnDecryptedFrameCallbackInterface
   void OnDecryptedFrame(
@@ -73,31 +52,33 @@ class BufferedFrameDecryptorTest
     ++decryption_status_change_count_;
   }
 
-  // Implements the OnAssembledFrameCallback interface.
-  void OnAssembledFrame(
-      std::unique_ptr<video_coding::RtpFrameObject> frame) override {}
-
   // Returns a new fake RtpFrameObject it abstracts the difficult construction
   // of the RtpFrameObject to simplify testing.
   std::unique_ptr<video_coding::RtpFrameObject> CreateRtpFrameObject(
       bool key_frame) {
     seq_num_++;
 
-    VCMPacket packet;
-    packet.video_header.codec = kVideoCodecGeneric;
-    packet.seqNum = seq_num_;
-    packet.video_header.frame_type = key_frame
-                                         ? VideoFrameType::kVideoFrameKey
-                                         : VideoFrameType::kVideoFrameDelta;
-    packet.generic_descriptor = RtpGenericFrameDescriptor();
-    fake_packet_buffer_.InsertPacket(&packet);
-    packet.seqNum = seq_num_;
-    packet.video_header.is_last_packet_in_frame = true;
-    fake_packet_buffer_.InsertPacket(&packet);
-
+    // clang-format off
     return std::make_unique<video_coding::RtpFrameObject>(
-        &fake_packet_buffer_, seq_num_, seq_num_, 0, 0, 0, RtpPacketInfos(),
+        seq_num_,
+        seq_num_,
+        /*markerBit=*/true,
+        /*times_nacked=*/0,
+        /*first_packet_received_time=*/0,
+        /*last_packet_received_time=*/0,
+        /*rtp_timestamp=*/0,
+        /*ntp_time_ms=*/0,
+        VideoSendTiming(),
+        /*payload_type=*/0,
+        kVideoCodecGeneric,
+        kVideoRotation_0,
+        VideoContentType::UNSPECIFIED,
+        RTPVideoHeader(),
+        /*color_space=*/absl::nullopt,
+        RtpGenericFrameDescriptor(),
+        RtpPacketInfos(),
         EncodedImageBuffer::Create(/*size=*/0));
+    // clang-format on
   }
 
  protected:
@@ -115,7 +96,6 @@ class BufferedFrameDecryptorTest
   static const size_t kMaxStashedFrames;
 
   std::vector<uint8_t> fake_packet_data_;
-  FakePacketBuffer fake_packet_buffer_;
   rtc::scoped_refptr<MockFrameDecryptor> mock_frame_decryptor_;
   std::unique_ptr<BufferedFrameDecryptor> buffered_frame_decryptor_;
   size_t decrypted_frame_call_count_;

@@ -21,6 +21,7 @@
 #include "api/video/video_stream_encoder_observer.h"
 #include "api/video_codecs/video_encoder_config.h"
 #include "call/video_send_stream.h"
+#include "modules/include/module_common_types_public.h"
 #include "modules/rtp_rtcp/include/report_block_data.h"
 #include "modules/video_coding/include/video_codec_interface.h"
 #include "modules/video_coding/include/video_coding_defines.h"
@@ -222,9 +223,7 @@ class SendStatisticsProxy : public VideoStreamEncoderObserver,
 
   void SetAdaptTimer(const AdaptationSteps& counts, StatsTimer* timer)
       RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
-  void UpdateAdaptationStats(const AdaptationSteps& cpu_counts,
-                             const AdaptationSteps& quality_counts)
-      RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
+  void UpdateAdaptationStats() RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
   void TryUpdateInitialQualityResolutionAdaptUp(
       const AdaptationSteps& quality_counts)
       RTC_EXCLUSIVE_LOCKS_REQUIRED(crit_);
@@ -262,6 +261,11 @@ class SendStatisticsProxy : public VideoStreamEncoderObserver,
   int last_num_simulcast_streams_ RTC_GUARDED_BY(crit_);
   std::array<bool, kMaxSpatialLayers> last_spatial_layer_use_
       RTC_GUARDED_BY(crit_);
+  // Indicates if the latest bitrate allocation had layers disabled by low
+  // available bandwidth.
+  bool bw_limited_layers_ RTC_GUARDED_BY(crit_);
+  AdaptationSteps cpu_counts_ RTC_GUARDED_BY(crit_);
+  AdaptationSteps quality_counts_ RTC_GUARDED_BY(crit_);
 
   struct EncoderChangeEvent {
     std::string previous_encoder_implementation;
@@ -286,9 +290,8 @@ class SendStatisticsProxy : public VideoStreamEncoderObserver,
     void InitializeBitrateCounters(const VideoSendStream::Stats& stats);
 
     bool InsertEncodedFrame(const EncodedImage& encoded_frame,
-                            int simulcast_idx,
-                            bool* is_limited_in_resolution);
-    void RemoveOld(int64_t now_ms, bool* is_limited_in_resolution);
+                            int simulcast_idx);
+    void RemoveOld(int64_t now_ms);
 
     const std::string uma_prefix_;
     Clock* const clock_;

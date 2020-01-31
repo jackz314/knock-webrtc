@@ -124,8 +124,10 @@ void ProcessThreadImpl::RegisterModule(Module* module,
     rtc::CritScope lock(&lock_);
     for (const ModuleCallback& mc : modules_) {
       RTC_DCHECK(mc.module != module)
-          << "Already registered here: " << mc.location.ToString() << "\n"
-          << "Now attempting from here: " << from.ToString();
+          << "Already registered here: " << mc.location.ToString()
+          << "\n"
+             "Now attempting from here: "
+          << from.ToString();
     }
   }
 #endif
@@ -190,7 +192,7 @@ bool ProcessThreadImpl::Process() {
         {
           TRACE_EVENT2("webrtc", "ModuleProcess", "function",
                        m.location.function_name(), "file",
-                       m.location.file_and_line());
+                       m.location.file_name());
           m.module->Process();
         }
         // Use a new 'now' reference to calculate when the next callback

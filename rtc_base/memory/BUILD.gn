@@ -13,26 +13,22 @@ if (is_android) {
 }
 
 rtc_source_set("aligned_array") {
-  sources = [
-    "aligned_array.h",
-  ]
+  sources = [ "aligned_array.h" ]
   deps = [
     ":aligned_malloc",
     "..:checks",
   ]
 }
 
-rtc_source_set("aligned_malloc") {
+rtc_library("aligned_malloc") {
   sources = [
     "aligned_malloc.cc",
     "aligned_malloc.h",
   ]
-  deps = [
-    "..:checks",
-  ]
+  deps = [ "..:checks" ]
 }
 
-rtc_source_set("fifo_buffer") {
+rtc_library("fifo_buffer") {
   visibility = [
     "../../p2p:rtc_p2p",
     "..:rtc_base_tests_utils",
@@ -43,12 +39,10 @@ rtc_source_set("fifo_buffer") {
     "fifo_buffer.cc",
     "fifo_buffer.h",
   ]
-  deps = [
-    "..:rtc_base",
-  ]
+  deps = [ "..:rtc_base" ]
 }
 
-rtc_source_set("unittests") {
+rtc_library("unittests") {
   testonly = true
   sources = [
     "aligned_array_unittest.cc",

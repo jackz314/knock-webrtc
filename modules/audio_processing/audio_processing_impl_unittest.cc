@@ -53,7 +53,9 @@ class MockEchoControlFactory : public EchoControlFactory {
   MockEchoControlFactory() : next_mock_(std::make_unique<MockEchoControl>()) {}
   // Returns a pointer to the next MockEchoControl that this factory creates.
   MockEchoControl* GetNext() const { return next_mock_.get(); }
-  std::unique_ptr<EchoControl> Create(int sample_rate_hz) override {
+  std::unique_ptr<EchoControl> Create(int sample_rate_hz,
+                                      int num_render_channels,
+                                      int num_capture_channels) override {
     std::unique_ptr<EchoControl> mock = std::move(next_mock_);
     next_mock_ = std::make_unique<MockEchoControl>();
     return mock;
@@ -221,9 +223,9 @@ TEST(AudioProcessingImplTest,
       AudioProcessingBuilder()
           .SetEchoControlFactory(std::move(echo_control_factory))
           .Create());
-  apm->gain_control()->Enable(false);  // Disable AGC.
-  apm->gain_control()->set_mode(GainControl::Mode::kFixedDigital);
+  // Disable AGC.
   webrtc::AudioProcessing::Config apm_config;
+  apm_config.gain_controller1.enabled = false;
   apm_config.gain_controller2.enabled = false;
   apm_config.pre_amplifier.enabled = true;
   apm_config.pre_amplifier.fixed_gain_factor = 1.f;
@@ -240,13 +242,13 @@ TEST(AudioProcessingImplTest,
 
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
   EXPECT_CALL(*echo_control_mock,
-              ProcessCapture(NotNull(), /*echo_path_change=*/false))
+              ProcessCapture(NotNull(), testing::_, /*echo_path_change=*/false))
       .Times(1);
   apm->ProcessStream(&frame);
 
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
   EXPECT_CALL(*echo_control_mock,
-              ProcessCapture(NotNull(), /*echo_path_change=*/true))
+              ProcessCapture(NotNull(), testing::_, /*echo_path_change=*/true))
       .Times(1);
   apm->SetRuntimeSetting(
       AudioProcessing::RuntimeSetting::CreateCapturePreGain(2.f));
@@ -264,9 +266,11 @@ TEST(AudioProcessingImplTest,
       AudioProcessingBuilder()
           .SetEchoControlFactory(std::move(echo_control_factory))
           .Create());
-  apm->gain_control()->Enable(true);  // Enable AGC.
-  apm->gain_control()->set_mode(GainControl::Mode::kAdaptiveAnalog);
   webrtc::AudioProcessing::Config apm_config;
+  // Enable AGC1.
+  apm_config.gain_controller1.enabled = true;
+  apm_config.gain_controller1.mode =
+      AudioProcessing::Config::GainController1::kAdaptiveAnalog;
   apm_config.gain_controller2.enabled = false;
   apm_config.pre_amplifier.enabled = false;
   apm->ApplyConfig(apm_config);
@@ -280,18 +284,20 @@ TEST(AudioProcessingImplTest,
 
   MockEchoControl* echo_control_mock = echo_control_factory_ptr->GetNext();
 
-  const int initial_analog_gain = apm->gain_control()->stream_analog_level();
+  const int initial_analog_gain = apm->recommended_stream_analog_level();
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
-  EXPECT_CALL(*echo_control_mock, ProcessCapture(NotNull(), false)).Times(1);
+  EXPECT_CALL(*echo_control_mock, ProcessCapture(NotNull(), testing::_, false))
+      .Times(1);
   apm->ProcessStream(&frame);
 
   // Force an analog gain change if it did not happen.
-  if (initial_analog_gain == apm->gain_control()->stream_analog_level()) {
-    apm->gain_control()->set_stream_analog_level(initial_analog_gain + 1);
+  if (initial_analog_gain == apm->recommended_stream_analog_level()) {
+    apm->set_stream_analog_level(initial_analog_gain + 1);
   }
 
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
-  EXPECT_CALL(*echo_control_mock, ProcessCapture(NotNull(), true)).Times(1);
+  EXPECT_CALL(*echo_control_mock, ProcessCapture(NotNull(), testing::_, true))
+      .Times(1);
   apm->ProcessStream(&frame);
 }
 
@@ -305,8 +311,11 @@ TEST(AudioProcessingImplTest, EchoControllerObservesPlayoutVolumeChange) {
       AudioProcessingBuilder()
           .SetEchoControlFactory(std::move(echo_control_factory))
           .Create());
-  apm->gain_control()->Enable(false);  // Disable AGC.
-  apm->gain_control()->set_mode(GainControl::Mode::kFixedDigital);
+  // Disable AGC.
+  webrtc::AudioProcessing::Config apm_config;
+  apm_config.gain_controller1.enabled = false;
+  apm_config.gain_controller2.enabled = false;
+  apm->ApplyConfig(apm_config);
 
   AudioFrame frame;
   constexpr int16_t kAudioLevel = 10000;
@@ -319,21 +328,13 @@ TEST(AudioProcessingImplTest, EchoControllerObservesPlayoutVolumeChange) {
 
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
   EXPECT_CALL(*echo_control_mock,
-              ProcessCapture(NotNull(), /*echo_path_change=*/false))
+              ProcessCapture(NotNull(), testing::_, /*echo_path_change=*/false))
       .Times(1);
   apm->ProcessStream(&frame);
 
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
   EXPECT_CALL(*echo_control_mock,
-              ProcessCapture(NotNull(), /*echo_path_change=*/false))
-      .Times(1);
-  apm->SetRuntimeSetting(
-      AudioProcessing::RuntimeSetting::CreatePlayoutVolumeChange(50));
-  apm->ProcessStream(&frame);
-
-  EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
-  EXPECT_CALL(*echo_control_mock,
-              ProcessCapture(NotNull(), /*echo_path_change=*/false))
+              ProcessCapture(NotNull(), testing::_, /*echo_path_change=*/false))
       .Times(1);
   apm->SetRuntimeSetting(
       AudioProcessing::RuntimeSetting::CreatePlayoutVolumeChange(50));
@@ -341,7 +342,15 @@ TEST(AudioProcessingImplTest, EchoControllerObservesPlayoutVolumeChange) {
 
   EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
   EXPECT_CALL(*echo_control_mock,
-              ProcessCapture(NotNull(), /*echo_path_change=*/true))
+              ProcessCapture(NotNull(), testing::_, /*echo_path_change=*/false))
+      .Times(1);
+  apm->SetRuntimeSetting(
+      AudioProcessing::RuntimeSetting::CreatePlayoutVolumeChange(50));
+  apm->ProcessStream(&frame);
+
+  EXPECT_CALL(*echo_control_mock, AnalyzeCapture(testing::_)).Times(1);
+  EXPECT_CALL(*echo_control_mock,
+              ProcessCapture(NotNull(), testing::_, /*echo_path_change=*/true))
       .Times(1);
   apm->SetRuntimeSetting(
       AudioProcessing::RuntimeSetting::CreatePlayoutVolumeChange(100));
@@ -369,6 +378,15 @@ TEST(AudioProcessingImplTest, RenderPreProcessorBeforeEchoDetector) {
   constexpr int16_t kAudioLevel = 1000;
   constexpr int kSampleRateHz = 16000;
   constexpr size_t kNumChannels = 1;
+  // Explicitly initialize APM to ensure no render frames are discarded.
+  const ProcessingConfig processing_config = {{
+      {kSampleRateHz, kNumChannels, /*has_keyboard=*/false},
+      {kSampleRateHz, kNumChannels, /*has_keyboard=*/false},
+      {kSampleRateHz, kNumChannels, /*has_keyboard=*/false},
+      {kSampleRateHz, kNumChannels, /*has_keyboard=*/false},
+  }};
+  apm->Initialize(processing_config);
+
   AudioFrame frame;
   InitializeAudioFrame(kSampleRateHz, kNumChannels, &frame);
 

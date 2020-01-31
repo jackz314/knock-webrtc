@@ -27,8 +27,8 @@
 #include "test/field_trial.h"
 #include "test/gmock.h"
 #include "test/gtest.h"
-#include "test/testsupport/file_utils.h"
 #include "test/testsupport/perf_test.h"
+#include "test/testsupport/resources_dir_flag.h"
 
 #if defined(WEBRTC_WIN)
 #include "rtc_base/win32_socket_init.h"
@@ -106,6 +106,11 @@ class TestMainImpl : public TestMain {
     ::testing::InitGoogleMock(argc, argv);
     absl::ParseCommandLine(*argc, argv);
 
+    // Make sure we always pull in the --resources_dir flag, even if the test
+    // binary doesn't link with fileutils (downstream expects all test mains to
+    // have this flag).
+    (void)absl::GetFlag(FLAGS_resources_dir);
+
     // Default to LS_INFO, even for release builds to provide better test
     // logging.
     if (rtc::LogMessage::GetLogToDebug() > rtc::LS_INFO)
@@ -116,20 +121,6 @@ class TestMainImpl : public TestMain {
 
     rtc::LogMessage::SetLogToStderr(absl::GetFlag(FLAGS_logs) ||
                                     absl::GetFlag(FLAGS_verbose));
-
-    std::string trace_event_path = absl::GetFlag(FLAGS_trace_event);
-    const bool capture_events = !trace_event_path.empty();
-    if (capture_events) {
-      rtc::tracing::SetupInternalTracer();
-      rtc::tracing::StartInternalCapture(trace_event_path.c_str());
-    }
-
-    // TODO(bugs.webrtc.org/9792): we need to reference something from
-    // fileutils.h so that our downstream hack where we replace fileutils.cc
-    // works. Otherwise the downstream flag implementation will take over and
-    // botch the flag introduced by the hack. Remove this awful thing once the
-    // downstream implementation has been eliminated.
-    (void)webrtc::test::JoinFilename("horrible", "hack");
 
     // InitFieldTrialsFromString stores the char*, so the char array must
     // outlive the application.
@@ -154,18 +145,22 @@ class TestMainImpl : public TestMain {
     rtc::ThreadManager::Instance()->WrapCurrentThread();
     RTC_CHECK(rtc::Thread::Current());
 
-    if (capture_events) {
-      rtc::tracing::StopInternalCapture();
-    }
     return 0;
   }
 
   int Run(int argc, char* argv[]) override {
+    std::string trace_event_path = absl::GetFlag(FLAGS_trace_event);
+    const bool capture_events = !trace_event_path.empty();
+    if (capture_events) {
+      rtc::tracing::SetupInternalTracer();
+      rtc::tracing::StartInternalCapture(trace_event_path.c_str());
+    }
+
 #if defined(WEBRTC_IOS)
     rtc::test::InitTestSuite(RUN_ALL_TESTS, argc, argv,
                              absl::GetFlag(FLAGS_save_chartjson_result));
     rtc::test::RunTestsFromIOSApp();
-    return 0;
+    int exit_code = 0;
 #else
     int exit_code = RUN_ALL_TESTS();
 
@@ -190,17 +185,21 @@ class TestMainImpl : public TestMain {
       result_file << "{\"version\": 3}";
       result_file.close();
     }
+#endif
+
+    if (capture_events) {
+      rtc::tracing::StopInternalCapture();
+    }
 
 #if defined(ADDRESS_SANITIZER) || defined(LEAK_SANITIZER) ||  \
     defined(MEMORY_SANITIZER) || defined(THREAD_SANITIZER) || \
     defined(UNDEFINED_SANITIZER)
     // We want the test flagged as failed only for sanitizer defects,
     // in which case the sanitizer will override exit code with 66.
-    return 0;
+    exit_code = 0;
 #endif
 
     return exit_code;
-#endif
   }
 
   ~TestMainImpl() override = default;

@@ -13,6 +13,8 @@
 #include "api/test/simulated_network.h"
 #include "call/fake_network_pipe.h"
 #include "call/simulated_network.h"
+#include "modules/rtp_rtcp/source/rtp_packet.h"
+#include "rtc_base/task_queue_for_test.h"
 #include "test/call_test.h"
 #include "test/gtest.h"
 #include "test/rtcp_packet_parser.h"
@@ -78,18 +80,19 @@ TEST_F(SsrcEndToEndTest, UnknownRtpPacketGivesUnknownSsrcReturnCode) {
   std::unique_ptr<test::DirectTransport> receive_transport;
   std::unique_ptr<PacketInputObserver> input_observer;
 
-  task_queue_.SendTask(
+  SendTask(
+      RTC_FROM_HERE, task_queue(),
       [this, &send_transport, &receive_transport, &input_observer]() {
         CreateCalls();
 
         send_transport = std::make_unique<test::DirectTransport>(
-            &task_queue_,
+            task_queue(),
             std::make_unique<FakeNetworkPipe>(
                 Clock::GetRealTimeClock(), std::make_unique<SimulatedNetwork>(
                                                BuiltInNetworkBehaviorConfig())),
             sender_call_.get(), payload_type_map_);
         receive_transport = std::make_unique<test::DirectTransport>(
-            &task_queue_,
+            task_queue(),
             std::make_unique<FakeNetworkPipe>(
                 Clock::GetRealTimeClock(), std::make_unique<SimulatedNetwork>(
                                                BuiltInNetworkBehaviorConfig())),
@@ -114,13 +117,14 @@ TEST_F(SsrcEndToEndTest, UnknownRtpPacketGivesUnknownSsrcReturnCode) {
   // Wait() waits for a received packet.
   EXPECT_TRUE(input_observer->Wait());
 
-  task_queue_.SendTask([this, &send_transport, &receive_transport]() {
-    Stop();
-    DestroyStreams();
-    send_transport.reset();
-    receive_transport.reset();
-    DestroyCalls();
-  });
+  SendTask(RTC_FROM_HERE, task_queue(),
+           [this, &send_transport, &receive_transport]() {
+             Stop();
+             DestroyStreams();
+             send_transport.reset();
+             receive_transport.reset();
+             DestroyCalls();
+           });
 }
 
 void SsrcEndToEndTest::TestSendsSetSsrcs(size_t num_ssrcs,
@@ -142,17 +146,17 @@ void SsrcEndToEndTest::TestSendsSetSsrcs(size_t num_ssrcs,
 
    private:
     Action OnSendRtp(const uint8_t* packet, size_t length) override {
-      RTPHeader header;
-      EXPECT_TRUE(parser_->Parse(packet, length, &header));
+      RtpPacket rtp_packet;
+      EXPECT_TRUE(rtp_packet.Parse(packet, length));
 
-      EXPECT_TRUE(valid_ssrcs_[header.ssrc])
-          << "Received unknown SSRC: " << header.ssrc;
+      EXPECT_TRUE(valid_ssrcs_[rtp_packet.Ssrc()])
+          << "Received unknown SSRC: " << rtp_packet.Ssrc();
 
-      if (!valid_ssrcs_[header.ssrc])
+      if (!valid_ssrcs_[rtp_packet.Ssrc()])
         observation_complete_.Set();
 
-      if (!is_observed_[header.ssrc]) {
-        is_observed_[header.ssrc] = true;
+      if (!is_observed_[rtp_packet.Ssrc()]) {
+        is_observed_[rtp_packet.Ssrc()] = true;
         --ssrcs_to_observe_;
         if (expect_single_ssrc_) {
           expect_single_ssrc_ = false;
@@ -266,21 +270,19 @@ TEST_F(SsrcEndToEndTest, DISABLED_RedundantPayloadsTransmittedOnAllSsrcs) {
 
    private:
     Action OnSendRtp(const uint8_t* packet, size_t length) override {
-      RTPHeader header;
-      EXPECT_TRUE(parser_->Parse(packet, length, &header));
+      RtpPacket rtp_packet;
+      EXPECT_TRUE(rtp_packet.Parse(packet, length));
 
-      if (!registered_rtx_ssrc_[header.ssrc])
+      if (!registered_rtx_ssrc_[rtp_packet.Ssrc()])
         return SEND_PACKET;
 
-      EXPECT_LE(header.headerLength + header.paddingLength, length);
-      const bool packet_is_redundant_payload =
-          header.headerLength + header.paddingLength < length;
+      const bool packet_is_redundant_payload = rtp_packet.payload_size() > 0;
 
       if (!packet_is_redundant_payload)
         return SEND_PACKET;
 
-      if (!observed_redundant_retransmission_[header.ssrc]) {
-        observed_redundant_retransmission_[header.ssrc] = true;
+      if (!observed_redundant_retransmission_[rtp_packet.Ssrc()]) {
+        observed_redundant_retransmission_[rtp_packet.Ssrc()] = true;
         if (--ssrcs_to_observe_ == 0)
           observation_complete_.Set();
       }

@@ -39,7 +39,8 @@ void FakeVoiceMediaChannel::VoiceChannelAudioSink::OnData(
     int bits_per_sample,
     int sample_rate,
     size_t number_of_channels,
-    size_t number_of_frames) {}
+    size_t number_of_frames,
+    absl::optional<int64_t> absolute_capture_timestamp_ms) {}
 void FakeVoiceMediaChannel::VoiceChannelAudioSink::OnClose() {
   source_ = nullptr;
 }
@@ -147,17 +148,17 @@ bool FakeVoiceMediaChannel::InsertDtmf(uint32_t ssrc,
   return true;
 }
 bool FakeVoiceMediaChannel::SetOutputVolume(uint32_t ssrc, double volume) {
-  if (0 == ssrc) {
-    std::map<uint32_t, double>::iterator it;
-    for (it = output_scalings_.begin(); it != output_scalings_.end(); ++it) {
-      it->second = volume;
-    }
-    return true;
-  } else if (output_scalings_.find(ssrc) != output_scalings_.end()) {
+  if (output_scalings_.find(ssrc) != output_scalings_.end()) {
     output_scalings_[ssrc] = volume;
     return true;
   }
   return false;
+}
+bool FakeVoiceMediaChannel::SetDefaultOutputVolume(double volume) {
+  for (auto& entry : output_scalings_) {
+    entry.second = volume;
+  }
+  return true;
 }
 bool FakeVoiceMediaChannel::GetOutputVolume(uint32_t ssrc, double* volume) {
   if (output_scalings_.find(ssrc) == output_scalings_.end())
@@ -187,6 +188,10 @@ bool FakeVoiceMediaChannel::GetStats(VoiceMediaInfo* info) {
 }
 void FakeVoiceMediaChannel::SetRawAudioSink(
     uint32_t ssrc,
+    std::unique_ptr<webrtc::AudioSinkInterface> sink) {
+  sink_ = std::move(sink);
+}
+void FakeVoiceMediaChannel::SetDefaultRawAudioSink(
     std::unique_ptr<webrtc::AudioSinkInterface> sink) {
   sink_ = std::move(sink);
 }
@@ -308,14 +313,15 @@ bool FakeVideoMediaChannel::GetSendCodec(VideoCodec* send_codec) {
 bool FakeVideoMediaChannel::SetSink(
     uint32_t ssrc,
     rtc::VideoSinkInterface<webrtc::VideoFrame>* sink) {
-  if (ssrc != 0 && sinks_.find(ssrc) == sinks_.end()) {
+  auto it = sinks_.find(ssrc);
+  if (it == sinks_.end()) {
     return false;
   }
-  if (ssrc != 0) {
-    sinks_[ssrc] = sink;
-  }
+  it->second = sink;
   return true;
 }
+void FakeVideoMediaChannel::SetDefaultSink(
+    rtc::VideoSinkInterface<webrtc::VideoFrame>* sink) {}
 bool FakeVideoMediaChannel::HasSink(uint32_t ssrc) const {
   return sinks_.find(ssrc) != sinks_.end() && sinks_.at(ssrc) != nullptr;
 }
@@ -400,10 +406,20 @@ bool FakeVideoMediaChannel::SetOptions(const VideoOptions& options) {
   options_ = options;
   return true;
 }
+
 bool FakeVideoMediaChannel::SetMaxSendBandwidth(int bps) {
   max_bps_ = bps;
   return true;
 }
+
+void FakeVideoMediaChannel::SetRecordableEncodedFrameCallback(
+    uint32_t ssrc,
+    std::function<void(const webrtc::RecordableEncodedFrame&)> callback) {}
+
+void FakeVideoMediaChannel::ClearRecordableEncodedFrameCallback(uint32_t ssrc) {
+}
+
+void FakeVideoMediaChannel::GenerateKeyFrame(uint32_t ssrc) {}
 
 FakeDataMediaChannel::FakeDataMediaChannel(void* unused,
                                            const DataOptions& options)
@@ -552,7 +568,8 @@ FakeVideoEngine::FakeVideoEngine()
     : capture_(false), fail_create_channel_(false) {
   // Add a fake video codec. Note that the name must not be "" as there are
   // sanity checks against that.
-  codecs_.push_back(VideoCodec(0, "fake_video_codec"));
+  send_codecs_.push_back(VideoCodec(0, "fake_video_codec"));
+  recv_codecs_.push_back(VideoCodec(0, "fake_video_codec"));
 }
 RtpCapabilities FakeVideoEngine::GetCapabilities() const {
   return RtpCapabilities();
@@ -583,12 +600,22 @@ void FakeVideoEngine::UnregisterChannel(VideoMediaChannel* channel) {
   RTC_DCHECK(it != channels_.end());
   channels_.erase(it);
 }
-std::vector<VideoCodec> FakeVideoEngine::codecs() const {
-  return codecs_;
+std::vector<VideoCodec> FakeVideoEngine::send_codecs() const {
+  return send_codecs_;
 }
-void FakeVideoEngine::SetCodecs(const std::vector<VideoCodec> codecs) {
-  codecs_ = codecs;
+
+std::vector<VideoCodec> FakeVideoEngine::recv_codecs() const {
+  return recv_codecs_;
 }
+
+void FakeVideoEngine::SetSendCodecs(const std::vector<VideoCodec>& codecs) {
+  send_codecs_ = codecs;
+}
+
+void FakeVideoEngine::SetRecvCodecs(const std::vector<VideoCodec>& codecs) {
+  recv_codecs_ = codecs;
+}
+
 bool FakeVideoEngine::SetCapture(bool capture) {
   capture_ = capture;
   return true;
@@ -612,7 +639,8 @@ void FakeMediaEngine::SetAudioSendCodecs(
   voice_->SetSendCodecs(codecs);
 }
 void FakeMediaEngine::SetVideoCodecs(const std::vector<VideoCodec>& codecs) {
-  video_->SetCodecs(codecs);
+  video_->SetSendCodecs(codecs);
+  video_->SetRecvCodecs(codecs);
 }
 
 FakeVoiceMediaChannel* FakeMediaEngine::GetVoiceChannel(size_t index) {

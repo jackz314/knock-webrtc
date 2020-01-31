@@ -20,8 +20,9 @@
 #include "api/audio_codecs/audio_decoder_factory.h"
 #include "api/audio_codecs/audio_encoder.h"
 #include "api/function_view.h"
+#include "api/neteq/neteq.h"
+#include "api/neteq/neteq_factory.h"
 #include "modules/audio_coding/include/audio_coding_module_typedefs.h"
-#include "modules/audio_coding/neteq/include/neteq.h"
 #include "system_wrappers/include/clock.h"
 
 namespace webrtc {
@@ -43,7 +44,21 @@ class AudioPacketizationCallback {
                            uint8_t payload_type,
                            uint32_t timestamp,
                            const uint8_t* payload_data,
-                           size_t payload_len_bytes) = 0;
+                           size_t payload_len_bytes,
+                           int64_t absolute_capture_timestamp_ms) {
+    // TODO(bugs.webrtc.org/10739): Deprecate the old SendData and make this one
+    // pure virtual.
+    return SendData(frame_type, payload_type, timestamp, payload_data,
+                    payload_len_bytes);
+  }
+  virtual int32_t SendData(AudioFrameType frame_type,
+                           uint8_t payload_type,
+                           uint32_t timestamp,
+                           const uint8_t* payload_data,
+                           size_t payload_len_bytes) {
+    RTC_NOTREACHED() << "This method must be overridden, or not used.";
+    return -1;
+  }
 };
 
 // Callback class used for reporting VAD decision
@@ -68,6 +83,7 @@ class AudioCodingModule {
     NetEq::Config neteq_config;
     Clock* clock;
     rtc::scoped_refptr<AudioDecoderFactory> decoder_factory;
+    NetEqFactory* neteq_factory = nullptr;
   };
 
   static AudioCodingModule* Create(const Config& config);

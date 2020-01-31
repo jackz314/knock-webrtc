@@ -12,6 +12,7 @@
 
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include "modules/rtp_rtcp/source/rtcp_packet/transport_feedback.h"
 #include "rtc_base/checks.h"
@@ -105,30 +106,14 @@ void RtcpTransceiver::UnsetRemb() {
   task_queue_->PostTask([ptr] { ptr->UnsetRemb(); });
 }
 
-uint32_t RtcpTransceiver::SSRC() const {
-  return rtcp_transceiver_->sender_ssrc();
-}
-
-bool RtcpTransceiver::SendFeedbackPacket(
-    const rtcp::TransportFeedback& packet) {
+void RtcpTransceiver::SendCombinedRtcpPacket(
+    std::vector<std::unique_ptr<rtcp::RtcpPacket>> rtcp_packets) {
   RTC_CHECK(rtcp_transceiver_);
   RtcpTransceiverImpl* ptr = rtcp_transceiver_.get();
-  rtc::Buffer raw_packet = packet.Build();
-  task_queue_->PostTask([ptr, raw_packet = std::move(raw_packet)] {
-    ptr->SendRawPacket(raw_packet);
-  });
-  return true;
-}
-
-bool RtcpTransceiver::SendNetworkStateEstimatePacket(
-    const rtcp::RemoteEstimate& packet) {
-  RTC_CHECK(rtcp_transceiver_);
-  RtcpTransceiverImpl* ptr = rtcp_transceiver_.get();
-  rtc::Buffer raw_packet = packet.Build();
-  task_queue_->PostTask([ptr, raw_packet = std::move(raw_packet)] {
-    ptr->SendRawPacket(raw_packet);
-  });
-  return true;
+  task_queue_->PostTask(
+      [ptr, rtcp_packets = std::move(rtcp_packets)]() mutable {
+        ptr->SendCombinedRtcpPacket(std::move(rtcp_packets));
+      });
 }
 
 void RtcpTransceiver::SendNack(uint32_t ssrc,
@@ -148,10 +133,16 @@ void RtcpTransceiver::SendPictureLossIndication(uint32_t ssrc) {
 }
 
 void RtcpTransceiver::SendFullIntraRequest(std::vector<uint32_t> ssrcs) {
+  return SendFullIntraRequest(std::move(ssrcs), true);
+}
+
+void RtcpTransceiver::SendFullIntraRequest(std::vector<uint32_t> ssrcs,
+                                           bool new_request) {
   RTC_CHECK(rtcp_transceiver_);
   RtcpTransceiverImpl* ptr = rtcp_transceiver_.get();
-  task_queue_->PostTask(
-      [ptr, ssrcs = std::move(ssrcs)] { ptr->SendFullIntraRequest(ssrcs); });
+  task_queue_->PostTask([ptr, ssrcs = std::move(ssrcs), new_request] {
+    ptr->SendFullIntraRequest(ssrcs, new_request);
+  });
 }
 
 }  // namespace webrtc

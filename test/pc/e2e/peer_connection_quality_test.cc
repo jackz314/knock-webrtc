@@ -21,8 +21,10 @@
 #include "api/rtc_event_log_output_file.h"
 #include "api/scoped_refptr.h"
 #include "api/task_queue/default_task_queue_factory.h"
+#include "api/test/create_frame_generator.h"
 #include "api/test/video_quality_analyzer_interface.h"
 #include "api/units/time_delta.h"
+#include "api/video/video_source_interface.h"
 #include "pc/sdp_utils.h"
 #include "pc/test/mock_peer_connection_observers.h"
 #include "rtc_base/bind.h"
@@ -30,9 +32,11 @@
 #include "rtc_base/numerics/safe_conversions.h"
 #include "system_wrappers/include/cpu_info.h"
 #include "system_wrappers/include/field_trial.h"
+#include "test/frame_generator_capturer.h"
 #include "test/pc/e2e/analyzer/audio/default_audio_quality_analyzer.h"
 #include "test/pc/e2e/analyzer/video/default_video_quality_analyzer.h"
 #include "test/pc/e2e/stats_poller.h"
+#include "test/platform_video_capturer.h"
 #include "test/testsupport/file_utils.h"
 
 namespace webrtc {
@@ -40,6 +44,7 @@ namespace webrtc_pc_e2e {
 namespace {
 
 using VideoConfig = PeerConnectionE2EQualityTestFixture::VideoConfig;
+using VideoCodecConfig = PeerConnectionE2EQualityTestFixture::VideoCodecConfig;
 
 constexpr int kDefaultTimeoutMs = 10000;
 constexpr char kSignalThreadName[] = "signaling_thread";
@@ -60,14 +65,20 @@ constexpr int kQuickTestModeRunDurationMs = 100;
 constexpr char kFlexFecEnabledFieldTrials[] =
     "WebRTC-FlexFEC-03-Advertised/Enabled/WebRTC-FlexFEC-03/Enabled/";
 
-std::string VideoConfigSourcePresenceToString(const VideoConfig& video_config) {
+std::string VideoConfigSourcePresenceToString(
+    const VideoConfig& video_config,
+    bool has_user_provided_generator) {
   char buf[1024];
   rtc::SimpleStringBuilder builder(buf);
   builder << "video_config.generator=" << video_config.generator.has_value()
           << "; video_config.input_file_name="
           << video_config.input_file_name.has_value()
           << "; video_config.screen_share_config="
-          << video_config.screen_share_config.has_value() << ";";
+          << video_config.screen_share_config.has_value()
+          << "; video_config.capturing_device_index="
+          << video_config.capturing_device_index.has_value()
+          << "; has_user_provided_generator=" << has_user_provided_generator
+          << ";";
   return builder.str();
 }
 
@@ -229,13 +240,21 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
       peer_configurations_[0]->ReleaseParams();
   std::unique_ptr<InjectableComponents> alice_components =
       peer_configurations_[0]->ReleaseComponents();
+  std::vector<std::unique_ptr<test::FrameGeneratorInterface>>
+      alice_video_generators =
+          peer_configurations_[0]->ReleaseVideoGenerators();
   std::unique_ptr<Params> bob_params = peer_configurations_[1]->ReleaseParams();
   std::unique_ptr<InjectableComponents> bob_components =
       peer_configurations_[1]->ReleaseComponents();
+  std::vector<std::unique_ptr<test::FrameGeneratorInterface>>
+      bob_video_generators = peer_configurations_[1]->ReleaseVideoGenerators();
   peer_configurations_.clear();
 
-  SetDefaultValuesForMissingParams({alice_params.get(), bob_params.get()});
-  ValidateParams(run_params, {alice_params.get(), bob_params.get()});
+  SetDefaultValuesForMissingParams(
+      &run_params, {alice_params.get(), bob_params.get()},
+      {&alice_video_generators, &bob_video_generators});
+  ValidateParams(run_params, {alice_params.get(), bob_params.get()},
+                 {&alice_video_generators, &bob_video_generators});
   SetupRequiredFieldTrials(run_params);
 
   // Print test summary
@@ -268,6 +287,7 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
 
   alice_ = TestPeer::CreateTestPeer(
       std::move(alice_components), std::move(alice_params),
+      std::move(alice_video_generators),
       std::make_unique<FixturePeerConnectionObserver>(
           [this, bob_video_configs](
               rtc::scoped_refptr<RtpTransceiverInterface> transceiver) {
@@ -279,6 +299,7 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
       run_params.echo_emulation_config, task_queue_.get());
   bob_ = TestPeer::CreateTestPeer(
       std::move(bob_components), std::move(bob_params),
+      std::move(bob_video_generators),
       std::make_unique<FixturePeerConnectionObserver>(
           [this, alice_video_configs](
               rtc::scoped_refptr<RtpTransceiverInterface> transceiver) {
@@ -375,10 +396,14 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
 
   RTC_LOG(INFO) << "Test is done, initiating disconnect sequence.";
 
-  task_queue_->SendTask([this]() {
-    RTC_DCHECK_RUN_ON(task_queue_.get());
-    stats_polling_task_.Stop();
-  });
+  task_queue_->SendTask(
+      [&stats_poller, this]() {
+        RTC_DCHECK_RUN_ON(task_queue_.get());
+        stats_polling_task_.Stop();
+        // Get final end-of-call stats.
+        stats_poller.PollStatsAndNotifyObservers();
+      },
+      RTC_FROM_HERE);
 
   // We need to detach AEC dumping from peers, because dump uses |task_queue_|
   // inside.
@@ -387,12 +412,14 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
   // Stop all client started tasks on task queue to prevent their access to any
   // call related objects after these objects will be destroyed during call tear
   // down.
-  task_queue_->SendTask([this]() {
-    rtc::CritScope crit(&lock_);
-    for (auto& handle : repeating_task_handles_) {
-      handle.Stop();
-    }
-  });
+  task_queue_->SendTask(
+      [this]() {
+        rtc::CritScope crit(&lock_);
+        for (auto& handle : repeating_task_handles_) {
+          handle.Stop();
+        }
+      },
+      RTC_FROM_HERE);
   // Tear down the call.
   signaling_thread->Invoke<void>(
       RTC_FROM_HERE,
@@ -418,7 +445,7 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
   // Audio dumps.
   RTC_CHECK(!alice_);
   RTC_CHECK(!bob_);
-  // Ensuring that FrameGeneratorCapturerVideoTrackSource and VideoFrameWriter
+  // Ensuring that TestVideoCapturerVideoTrackSource and VideoFrameWriter
   // are destroyed on the right thread.
   RTC_CHECK(alice_video_sources_.empty());
   RTC_CHECK(bob_video_sources_.empty());
@@ -426,15 +453,23 @@ void PeerConnectionE2EQualityTest::Run(RunParams run_params) {
 }
 
 void PeerConnectionE2EQualityTest::SetDefaultValuesForMissingParams(
-    std::vector<Params*> params) {
+    RunParams* run_params,
+    std::vector<Params*> params,
+    std::vector<std::vector<std::unique_ptr<test::FrameGeneratorInterface>>*>
+        video_generators) {
   int video_counter = 0;
   int audio_counter = 0;
   std::set<std::string> video_labels;
   std::set<std::string> audio_labels;
-  for (auto* p : params) {
-    for (auto& video_config : p->video_configs) {
+  for (size_t i = 0; i < params.size(); ++i) {
+    auto* p = params[i];
+    for (size_t j = 0; j < p->video_configs.size(); ++j) {
+      VideoConfig& video_config = p->video_configs[j];
+      std::unique_ptr<test::FrameGeneratorInterface>& video_generator =
+          (*video_generators[i])[j];
       if (!video_config.generator && !video_config.input_file_name &&
-          !video_config.screen_share_config) {
+          !video_config.screen_share_config &&
+          !video_config.capturing_device_index && !video_generator) {
         video_config.generator = VideoGeneratorType::kDefault;
       }
       if (!video_config.stream_label) {
@@ -457,16 +492,25 @@ void PeerConnectionE2EQualityTest::SetDefaultValuesForMissingParams(
       }
     }
   }
+
+  if (run_params->video_codecs.empty()) {
+    run_params->video_codecs.push_back(VideoCodecConfig(
+        run_params->video_codec_name, run_params->video_codec_required_params));
+  }
 }
 
-void PeerConnectionE2EQualityTest::ValidateParams(const RunParams& run_params,
-                                                  std::vector<Params*> params) {
+void PeerConnectionE2EQualityTest::ValidateParams(
+    const RunParams& run_params,
+    std::vector<Params*> params,
+    std::vector<std::vector<std::unique_ptr<test::FrameGeneratorInterface>>*>
+        video_generators) {
   RTC_CHECK_GT(run_params.video_encoder_bitrate_multiplier, 0.0);
 
   std::set<std::string> video_labels;
   std::set<std::string> audio_labels;
   int media_streams_count = 0;
 
+  bool has_simulcast = false;
   for (size_t i = 0; i < params.size(); ++i) {
     Params* p = params[i];
     if (p->audio_config) {
@@ -477,22 +521,28 @@ void PeerConnectionE2EQualityTest::ValidateParams(const RunParams& run_params,
     // Validate that each video config has exactly one of |generator|,
     // |input_file_name| or |screen_share_config| set. Also validate that all
     // video stream labels are unique.
-    for (auto& video_config : p->video_configs) {
+    for (size_t j = 0; j < p->video_configs.size(); ++j) {
+      VideoConfig& video_config = p->video_configs[j];
       RTC_CHECK(video_config.stream_label);
       bool inserted =
           video_labels.insert(video_config.stream_label.value()).second;
       RTC_CHECK(inserted) << "Duplicate video_config.stream_label="
                           << video_config.stream_label.value();
-      RTC_CHECK(video_config.generator || video_config.input_file_name ||
-                video_config.screen_share_config)
-          << VideoConfigSourcePresenceToString(video_config);
-      RTC_CHECK(!(video_config.input_file_name && video_config.generator))
-          << VideoConfigSourcePresenceToString(video_config);
-      RTC_CHECK(
-          !(video_config.input_file_name && video_config.screen_share_config))
-          << VideoConfigSourcePresenceToString(video_config);
-      RTC_CHECK(!(video_config.screen_share_config && video_config.generator))
-          << VideoConfigSourcePresenceToString(video_config);
+      int input_sources_count = 0;
+      if (video_config.generator)
+        ++input_sources_count;
+      if (video_config.input_file_name)
+        ++input_sources_count;
+      if (video_config.screen_share_config)
+        ++input_sources_count;
+      if (video_config.capturing_device_index)
+        ++input_sources_count;
+      if ((*video_generators[i])[j])
+        ++input_sources_count;
+
+      // TODO(titovartem) handle video_generators case properly
+      RTC_CHECK_EQ(input_sources_count, 1) << VideoConfigSourcePresenceToString(
+          video_config, (*video_generators[i])[j] != nullptr);
 
       if (video_config.screen_share_config) {
         if (video_config.screen_share_config->slides_yuv_file_names.empty()) {
@@ -525,6 +575,7 @@ void PeerConnectionE2EQualityTest::ValidateParams(const RunParams& run_params,
         }
       }
       if (video_config.simulcast_config) {
+        has_simulcast = true;
         // We support simulcast only from caller.
         RTC_CHECK_EQ(i, 0)
             << "Only simulcast stream from first peer is supported";
@@ -551,6 +602,11 @@ void PeerConnectionE2EQualityTest::ValidateParams(const RunParams& run_params,
             << " doesn't exist";
       }
     }
+  }
+  if (has_simulcast) {
+    RTC_CHECK_EQ(run_params.video_codecs.size(), 1)
+        << "Only 1 video codec is supported when simulcast is enabled in at "
+        << "least 1 video config";
   }
 
   RTC_CHECK_GT(media_streams_count, 0) << "No media in the call.";
@@ -624,7 +680,8 @@ void PeerConnectionE2EQualityTest::SetupCallOnSignalingThread(
     RtpTransceiverInit transceiver_params;
     if (video_config.simulcast_config) {
       transceiver_params.direction = RtpTransceiverDirection::kSendOnly;
-      if (run_params.video_codec_name == cricket::kVp8CodecName) {
+      // Because simulcast enabled |run_params.video_codecs| has only 1 element.
+      if (run_params.video_codecs[0].name == cricket::kVp8CodecName) {
         // For Vp8 simulcast we need to add as many RtpEncodingParameters to the
         // track as many simulcast streams requested.
         for (int i = 0;
@@ -678,37 +735,28 @@ void PeerConnectionE2EQualityTest::TearDownCallOnSignalingThread() {
   TearDownCall();
 }
 
-std::vector<rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>
+std::vector<rtc::scoped_refptr<TestVideoCapturerVideoTrackSource>>
 PeerConnectionE2EQualityTest::MaybeAddMedia(TestPeer* peer) {
   MaybeAddAudio(peer);
   return MaybeAddVideo(peer);
 }
 
-std::vector<rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>
+std::vector<rtc::scoped_refptr<TestVideoCapturerVideoTrackSource>>
 PeerConnectionE2EQualityTest::MaybeAddVideo(TestPeer* peer) {
   // Params here valid because of pre-run validation.
   Params* params = peer->params();
-  std::vector<rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>> out;
-  for (auto video_config : params->video_configs) {
-    // Create video generator.
-    std::unique_ptr<test::FrameGenerator> frame_generator =
-        CreateFrameGenerator(video_config);
-
-    // Wrap it to inject video quality analyzer and enable dump of input video
-    // if required.
+  std::vector<rtc::scoped_refptr<TestVideoCapturerVideoTrackSource>> out;
+  for (size_t i = 0; i < params->video_configs.size(); ++i) {
+    auto video_config = params->video_configs[i];
+    // Setup input video source into peer connection.
     test::VideoFrameWriter* writer =
         MaybeCreateVideoWriter(video_config.input_dump_file_name, video_config);
-    frame_generator =
-        video_quality_analyzer_injection_helper_->WrapFrameGenerator(
-            video_config, std::move(frame_generator), writer);
-
-    // Setup FrameGenerator into peer connection.
-    auto capturer = std::make_unique<test::FrameGeneratorCapturer>(
-        clock_, std::move(frame_generator), video_config.fps,
-        *task_queue_factory_);
-    capturer->Init();
-    rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource> source =
-        new rtc::RefCountedObject<FrameGeneratorCapturerVideoTrackSource>(
+    std::unique_ptr<test::TestVideoCapturer> capturer = CreateVideoCapturer(
+        video_config, peer->ReleaseVideoGenerator(i),
+        video_quality_analyzer_injection_helper_->CreateFramePreprocessor(
+            video_config, writer));
+    rtc::scoped_refptr<TestVideoCapturerVideoTrackSource> source =
+        new rtc::RefCountedObject<TestVideoCapturerVideoTrackSource>(
             std::move(capturer),
             /*is_screencast=*/video_config.screen_share_config &&
                 video_config.screen_share_config->use_text_content_hint);
@@ -738,43 +786,69 @@ PeerConnectionE2EQualityTest::MaybeAddVideo(TestPeer* peer) {
   return out;
 }
 
-std::unique_ptr<test::FrameGenerator>
-PeerConnectionE2EQualityTest::CreateFrameGenerator(
-    const VideoConfig& video_config) {
+std::unique_ptr<test::TestVideoCapturer>
+PeerConnectionE2EQualityTest::CreateVideoCapturer(
+    const VideoConfig& video_config,
+    std::unique_ptr<test::FrameGeneratorInterface> generator,
+    std::unique_ptr<test::TestVideoCapturer::FramePreprocessor>
+        frame_preprocessor) {
+  if (video_config.capturing_device_index) {
+    std::unique_ptr<test::TestVideoCapturer> capturer =
+        test::CreateVideoCapturer(video_config.width, video_config.height,
+                                  video_config.fps,
+                                  *video_config.capturing_device_index);
+    RTC_CHECK(capturer)
+        << "Failed to obtain input stream from capturing device #"
+        << *video_config.capturing_device_index;
+    capturer->SetFramePreprocessor(std::move(frame_preprocessor));
+    return capturer;
+  }
+
+  std::unique_ptr<test::FrameGeneratorInterface> frame_generator = nullptr;
+  if (generator) {
+    frame_generator = std::move(generator);
+  }
+
   if (video_config.generator) {
-    absl::optional<test::FrameGenerator::OutputType> frame_generator_type =
-        absl::nullopt;
+    absl::optional<test::FrameGeneratorInterface::OutputType>
+        frame_generator_type = absl::nullopt;
     if (video_config.generator == VideoGeneratorType::kDefault) {
-      frame_generator_type = test::FrameGenerator::OutputType::kI420;
+      frame_generator_type = test::FrameGeneratorInterface::OutputType::kI420;
     } else if (video_config.generator == VideoGeneratorType::kI420A) {
-      frame_generator_type = test::FrameGenerator::OutputType::kI420A;
+      frame_generator_type = test::FrameGeneratorInterface::OutputType::kI420A;
     } else if (video_config.generator == VideoGeneratorType::kI010) {
-      frame_generator_type = test::FrameGenerator::OutputType::kI010;
+      frame_generator_type = test::FrameGeneratorInterface::OutputType::kI010;
     }
-    return test::FrameGenerator::CreateSquareGenerator(
-        static_cast<int>(video_config.width),
-        static_cast<int>(video_config.height), frame_generator_type,
-        absl::nullopt);
+    frame_generator =
+        test::CreateSquareFrameGenerator(static_cast<int>(video_config.width),
+                                         static_cast<int>(video_config.height),
+                                         frame_generator_type, absl::nullopt);
   }
   if (video_config.input_file_name) {
-    return test::FrameGenerator::CreateFromYuvFile(
+    frame_generator = test::CreateFromYuvFileFrameGenerator(
         std::vector<std::string>(/*count=*/1,
                                  video_config.input_file_name.value()),
         video_config.width, video_config.height, /*frame_repeat_count=*/1);
   }
   if (video_config.screen_share_config) {
-    return CreateScreenShareFrameGenerator(video_config);
+    frame_generator = CreateScreenShareFrameGenerator(video_config);
   }
-  RTC_NOTREACHED() << "Unsupported video_config input source";
-  return nullptr;
+  RTC_CHECK(frame_generator) << "Unsupported video_config input source";
+
+  auto capturer = std::make_unique<test::FrameGeneratorCapturer>(
+      clock_, std::move(frame_generator), video_config.fps,
+      *task_queue_factory_);
+  capturer->SetFramePreprocessor(std::move(frame_preprocessor));
+  capturer->Init();
+  return capturer;
 }
 
-std::unique_ptr<test::FrameGenerator>
+std::unique_ptr<test::FrameGeneratorInterface>
 PeerConnectionE2EQualityTest::CreateScreenShareFrameGenerator(
     const VideoConfig& video_config) {
   RTC_CHECK(video_config.screen_share_config);
   if (video_config.screen_share_config->generate_slides) {
-    return test::FrameGenerator::CreateSlideGenerator(
+    return test::CreateSlideFrameGenerator(
         video_config.width, video_config.height,
         video_config.screen_share_config->slide_change_interval.seconds() *
             video_config.fps);
@@ -792,7 +866,7 @@ PeerConnectionE2EQualityTest::CreateScreenShareFrameGenerator(
   }
   if (!video_config.screen_share_config->scrolling_params) {
     // Cycle image every slide_change_interval seconds.
-    return test::FrameGenerator::CreateFromYuvFile(
+    return test::CreateFromYuvFileFrameGenerator(
         slides, video_config.width, video_config.height,
         video_config.screen_share_config->slide_change_interval.seconds() *
             video_config.fps);
@@ -803,7 +877,7 @@ PeerConnectionE2EQualityTest::CreateScreenShareFrameGenerator(
       video_config.screen_share_config->slide_change_interval -
       video_config.screen_share_config->scrolling_params->duration;
 
-  return test::FrameGenerator::CreateScrollingInputFromYuvFiles(
+  return test::CreateScrollingInputFromYuvFilesFrameGenerator(
       clock_, slides,
       video_config.screen_share_config->scrolling_params->source_width,
       video_config.screen_share_config->scrolling_params->source_height,
@@ -829,15 +903,15 @@ void PeerConnectionE2EQualityTest::SetPeerCodecPreferences(
     const RunParams& run_params) {
   std::vector<RtpCodecCapability> with_rtx_video_capabilities =
       FilterVideoCodecCapabilities(
-          run_params.video_codec_name, run_params.video_codec_required_params,
-          true, run_params.use_ulp_fec, run_params.use_flex_fec,
+          run_params.video_codecs, true, run_params.use_ulp_fec,
+          run_params.use_flex_fec,
           peer->pc_factory()
               ->GetRtpSenderCapabilities(cricket::MediaType::MEDIA_TYPE_VIDEO)
               .codecs);
   std::vector<RtpCodecCapability> without_rtx_video_capabilities =
       FilterVideoCodecCapabilities(
-          run_params.video_codec_name, run_params.video_codec_required_params,
-          false, run_params.use_ulp_fec, run_params.use_flex_fec,
+          run_params.video_codecs, false, run_params.use_ulp_fec,
+          run_params.use_flex_fec,
           peer->pc_factory()
               ->GetRtpSenderCapabilities(cricket::MediaType::MEDIA_TYPE_VIDEO)
               .codecs);
@@ -871,7 +945,7 @@ void PeerConnectionE2EQualityTest::SetupCall(const RunParams& run_params) {
            video_config.simulcast_config->simulcast_streams_count});
     }
   }
-  PatchingParams patching_params(run_params.video_codec_name,
+  PatchingParams patching_params(run_params.video_codecs,
                                  run_params.use_conference_mode,
                                  stream_label_to_simulcast_streams_count);
   SignalingInterceptor signaling_interceptor(patching_params);
@@ -955,8 +1029,8 @@ void PeerConnectionE2EQualityTest::ExchangeIceCandidates(
 }
 
 void PeerConnectionE2EQualityTest::StartVideo(
-    const std::vector<
-        rtc::scoped_refptr<FrameGeneratorCapturerVideoTrackSource>>& sources) {
+    const std::vector<rtc::scoped_refptr<TestVideoCapturerVideoTrackSource>>&
+        sources) {
   for (auto& source : sources) {
     if (source->state() != MediaSourceInterface::SourceState::kLive) {
       source->Start();
@@ -975,15 +1049,15 @@ void PeerConnectionE2EQualityTest::TearDownCall() {
   alice_->pc()->Close();
   bob_->pc()->Close();
 
+  alice_video_sources_.clear();
+  bob_video_sources_.clear();
+  alice_.reset();
+  bob_.reset();
+
   for (const auto& video_writer : video_writers_) {
     video_writer->Close();
   }
-
-  alice_video_sources_.clear();
-  bob_video_sources_.clear();
   video_writers_.clear();
-  alice_.reset();
-  bob_.reset();
 }
 
 test::VideoFrameWriter* PeerConnectionE2EQualityTest::MaybeCreateVideoWriter(

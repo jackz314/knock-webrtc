@@ -10,7 +10,6 @@
 
 package org.webrtc;
 
-import android.graphics.SurfaceTexture;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaCodecInfo.CodecCapabilities;
@@ -140,6 +139,7 @@ public class MediaCodecVideoDecoder {
     VIDEO_CODEC_UNKNOWN,
     VIDEO_CODEC_VP8,
     VIDEO_CODEC_VP9,
+    VIDEO_CODEC_AV1,
     VIDEO_CODEC_H264;
 
     @CalledByNative("VideoCodecType")

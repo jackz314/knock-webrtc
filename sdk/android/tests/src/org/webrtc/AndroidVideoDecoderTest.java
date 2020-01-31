@@ -11,9 +11,9 @@
 package org.webrtc;
 
 import static com.google.common.truth.Truth.assertThat;
-import static org.mockito.Matchers.any;
-import static org.mockito.Matchers.anyInt;
-import static org.mockito.Matchers.anyLong;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Matchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
@@ -21,7 +21,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.robolectric.Shadows.shadowOf;
 
 import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
@@ -186,7 +185,7 @@ public class AndroidVideoDecoderTest {
 
   private EncodedImage createTestEncodedImage() {
     return EncodedImage.builder()
-        .setBuffer(ByteBuffer.wrap(ENCODED_TEST_DATA))
+        .setBuffer(ByteBuffer.wrap(ENCODED_TEST_DATA), null)
         .setFrameType(FrameType.VideoFrameKey)
         .setCompleteFrame(true)
         .createEncodedImage();

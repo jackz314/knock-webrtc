@@ -266,7 +266,6 @@ void VP9EncoderImpl::SetFecControllerOverride(
 int VP9EncoderImpl::Release() {
   int ret_val = WEBRTC_VIDEO_CODEC_OK;
 
-  encoded_image_.Allocate(0);
   if (encoder_ != nullptr) {
     if (inited_) {
       if (vpx_codec_destroy(encoder_)) {
@@ -1033,7 +1032,8 @@ int VP9EncoderImpl::Encode(const VideoFrame& input_image,
   if (rv != VPX_CODEC_OK) {
     RTC_LOG(LS_ERROR) << "Encoding error: " << vpx_codec_err_to_string(rv)
                       << "\n"
-                      << "Details: " << vpx_codec_error(encoder_) << "\n"
+                         "Details: "
+                      << vpx_codec_error(encoder_) << "\n"
                       << vpx_codec_error_detail(encoder_);
     return WEBRTC_VIDEO_CODEC_ERROR;
   }
@@ -1113,6 +1113,7 @@ void VP9EncoderImpl::PopulateCodecSpecific(CodecSpecificInfo* codec_specific,
   // Always populate this, so that the packetizer can properly set the marker
   // bit.
   vp9_info->num_spatial_layers = num_active_spatial_layers_;
+  vp9_info->first_active_layer = first_active_layer_;
 
   vp9_info->num_ref_pics = 0;
   FillReferenceIndices(pkt, pics_since_key_, vp9_info->inter_layer_predicted,
@@ -1609,8 +1610,9 @@ VP9DecoderImpl::~VP9DecoderImpl() {
     // The frame buffers are reference counted and frames are exposed after
     // decoding. There may be valid usage cases where previous frames are still
     // referenced after ~VP9DecoderImpl that is not a leak.
-    RTC_LOG(LS_INFO) << num_buffers_in_use << " Vp9FrameBuffers are still "
-                     << "referenced during ~VP9DecoderImpl.";
+    RTC_LOG(LS_INFO) << num_buffers_in_use
+                     << " Vp9FrameBuffers are still "
+                        "referenced during ~VP9DecoderImpl.";
   }
 }
 
@@ -1626,10 +1628,20 @@ int VP9DecoderImpl::InitDecode(const VideoCodec* inst, int number_of_cores) {
   vpx_codec_dec_cfg_t cfg;
   memset(&cfg, 0, sizeof(cfg));
 
+#ifdef FUZZING_BUILD_MODE_UNSAFE_FOR_PRODUCTION
+  // We focus on webrtc fuzzing here, not libvpx itself. Use single thread for
+  // fuzzing, because:
+  //  - libvpx's VP9 single thread decoder is more fuzzer friendly. It detects
+  //    errors earlier than the multi-threads version.
+  //  - Make peak CPU usage under control (not depending on input)
+  cfg.threads = 1;
+  (void)kMaxNumTiles4kVideo;  // unused
+#else
   // We want to use multithreading when decoding high resolution videos. But,
   // since we don't know resolution of input stream at this stage, we always
   // enable it.
   cfg.threads = std::min(number_of_cores, kMaxNumTiles4kVideo);
+#endif
 
   vpx_codec_flags_t flags = 0;
   if (vpx_codec_dec_init(decoder_, vpx_codec_vp9_dx(), &cfg, flags)) {
@@ -1643,6 +1655,11 @@ int VP9DecoderImpl::InitDecode(const VideoCodec* inst, int number_of_cores) {
   inited_ = true;
   // Always start with a complete key frame.
   key_frame_required_ = true;
+  if (inst && inst->buffer_pool_size) {
+    if (!frame_buffer_pool_.Resize(*inst->buffer_pool_size)) {
+      return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+    }
+  }
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -1716,15 +1733,28 @@ int VP9DecoderImpl::ReturnFrame(
   rtc::scoped_refptr<VideoFrameBuffer> img_wrapped_buffer;
   switch (img->bit_depth) {
     case 8:
-      img_wrapped_buffer = WrapI420Buffer(
-          img->d_w, img->d_h, img->planes[VPX_PLANE_Y],
-          img->stride[VPX_PLANE_Y], img->planes[VPX_PLANE_U],
-          img->stride[VPX_PLANE_U], img->planes[VPX_PLANE_V],
-          img->stride[VPX_PLANE_V],
-          // WrappedI420Buffer's mechanism for allowing the release of its frame
-          // buffer is through a callback function. This is where we should
-          // release |img_buffer|.
-          rtc::KeepRefUntilDone(img_buffer));
+      RTC_DCHECK(img->fmt == VPX_IMG_FMT_I420 || img->fmt == VPX_IMG_FMT_I444);
+      if (img->fmt == VPX_IMG_FMT_I420) {
+        img_wrapped_buffer = WrapI420Buffer(
+            img->d_w, img->d_h, img->planes[VPX_PLANE_Y],
+            img->stride[VPX_PLANE_Y], img->planes[VPX_PLANE_U],
+            img->stride[VPX_PLANE_U], img->planes[VPX_PLANE_V],
+            img->stride[VPX_PLANE_V],
+            // WrappedI420Buffer's mechanism for allowing the release of its
+            // frame buffer is through a callback function. This is where we
+            // should release |img_buffer|.
+            rtc::KeepRefUntilDone(img_buffer));
+      } else if (img->fmt == VPX_IMG_FMT_I444) {
+        img_wrapped_buffer = WrapI444Buffer(
+            img->d_w, img->d_h, img->planes[VPX_PLANE_Y],
+            img->stride[VPX_PLANE_Y], img->planes[VPX_PLANE_U],
+            img->stride[VPX_PLANE_U], img->planes[VPX_PLANE_V],
+            img->stride[VPX_PLANE_V],
+            // WrappedI444Buffer's mechanism for allowing the release of its
+            // frame buffer is through a callback function. This is where we
+            // should release |img_buffer|.
+            rtc::KeepRefUntilDone(img_buffer));
+      }
       break;
     case 10:
       img_wrapped_buffer = WrapI010Buffer(
@@ -1737,7 +1767,8 @@ int VP9DecoderImpl::ReturnFrame(
           img->stride[VPX_PLANE_V] / 2, rtc::KeepRefUntilDone(img_buffer));
       break;
     default:
-      RTC_NOTREACHED();
+      RTC_LOG(LS_ERROR) << "Unsupported bit depth produced by the decoder: "
+                        << img->bit_depth;
       return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
   }
 

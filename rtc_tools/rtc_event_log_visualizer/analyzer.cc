@@ -18,6 +18,7 @@
 #include <string>
 #include <utility>
 
+#include "absl/algorithm/container.h"
 #include "absl/strings/string_view.h"
 #include "api/function_view.h"
 #include "api/transport/field_trial_based_config.h"
@@ -1268,14 +1269,14 @@ void EventLogAnalyzer::CreateSendSideBweSimulationGraph(Plot* plot) {
   FieldTrialBasedConfig field_trial_config_;
   // The event_log_visualizer should normally not be compiled with
   // BWE_TEST_LOGGING_COMPILE_TIME_ENABLE since the normal plots won't work.
-  // However, compiling with BWE_TEST_LOGGING, running with --plot_sendside_bwe
+  // However, compiling with BWE_TEST_LOGGING, running with --plot=sendside_bwe
   // and piping the output to plot_dynamics.py can be used as a hack to get the
   // internal state of various BWE components. In this case, it is important
   // we don't instantiate the AcknowledgedBitrateEstimator both here and in
   // GoogCcNetworkController since that would lead to duplicate outputs.
-  AcknowledgedBitrateEstimator acknowledged_bitrate_estimator(
-      &field_trial_config_,
-      std::make_unique<BitrateEstimator>(&field_trial_config_));
+  std::unique_ptr<AcknowledgedBitrateEstimatorInterface>
+      acknowledged_bitrate_estimator(
+          AcknowledgedBitrateEstimatorInterface::Create(&field_trial_config_));
 #endif  // !(BWE_TEST_LOGGING_COMPILE_TIME_ENABLE)
   int64_t time_us =
       std::min({NextRtpTime(), NextRtcpTime(), NextProcessTime()});
@@ -1320,7 +1321,8 @@ void EventLogAnalyzer::CreateSendSideBweSimulationGraph(Plot* plot) {
             feedback_msg->SortedByReceiveTime();
         if (!feedback.empty()) {
 #if !(BWE_TEST_LOGGING_COMPILE_TIME_ENABLE)
-          acknowledged_bitrate_estimator.IncomingPacketFeedbackVector(feedback);
+          acknowledged_bitrate_estimator->IncomingPacketFeedbackVector(
+              feedback);
 #endif  // !(BWE_TEST_LOGGING_COMPILE_TIME_ENABLE)
           for (const PacketResult& packet : feedback)
             acked_bitrate.Update(packet.sent_packet.size.bytes(),
@@ -1333,7 +1335,7 @@ void EventLogAnalyzer::CreateSendSideBweSimulationGraph(Plot* plot) {
       float y = bitrate_bps.value_or(0) / 1000;
       acked_time_series.points.emplace_back(x, y);
 #if !(BWE_TEST_LOGGING_COMPILE_TIME_ENABLE)
-      y = acknowledged_bitrate_estimator.bitrate()
+      y = acknowledged_bitrate_estimator->bitrate()
               .value_or(DataRate::Zero())
               .kbps();
       acked_estimate_time_series.points.emplace_back(x, y);
@@ -1447,22 +1449,24 @@ void EventLogAnalyzer::CreateReceiveSideBweSimulationGraph(Plot* plot) {
 }
 
 void EventLogAnalyzer::CreateNetworkDelayFeedbackGraph(Plot* plot) {
-  TimeSeries late_feedback_series("Late feedback results.", LineStyle::kNone,
-                                  PointStyle::kHighlight);
   TimeSeries time_series("Network delay", LineStyle::kLine,
                          PointStyle::kHighlight);
   int64_t min_send_receive_diff_ms = std::numeric_limits<int64_t>::max();
   int64_t min_rtt_ms = std::numeric_limits<int64_t>::max();
 
   int64_t prev_y = 0;
-  for (auto packet : GetNetworkTrace(parsed_log_)) {
-    if (packet.arrival_time_ms == PacketFeedback::kNotReceived)
+  std::vector<MatchedSendArrivalTimes> matched_rtp_rtcp =
+      GetNetworkTrace(parsed_log_);
+  absl::c_stable_sort(matched_rtp_rtcp, [](const MatchedSendArrivalTimes& a,
+                                           const MatchedSendArrivalTimes& b) {
+    return a.feedback_arrival_time_ms < b.feedback_arrival_time_ms ||
+           (a.feedback_arrival_time_ms == b.feedback_arrival_time_ms &&
+            a.arrival_time_ms < b.arrival_time_ms);
+  });
+  for (const auto& packet : matched_rtp_rtcp) {
+    if (packet.arrival_time_ms == MatchedSendArrivalTimes::kNotReceived)
       continue;
     float x = config_.GetCallTimeSec(1000 * packet.feedback_arrival_time_ms);
-    if (packet.send_time_ms == PacketFeedback::kNoSendTime) {
-      late_feedback_series.points.emplace_back(x, prev_y);
-      continue;
-    }
     int64_t y = packet.arrival_time_ms - packet.send_time_ms;
     prev_y = y;
     int64_t rtt_ms = packet.feedback_arrival_time_ms - packet.send_time_ms;
@@ -1478,12 +1482,9 @@ void EventLogAnalyzer::CreateNetworkDelayFeedbackGraph(Plot* plot) {
       min_send_receive_diff_ms - min_rtt_ms / 2;
   for (TimeSeriesPoint& point : time_series.points)
     point.y -= estimated_clock_offset_ms;
-  for (TimeSeriesPoint& point : late_feedback_series.points)
-    point.y -= estimated_clock_offset_ms;
 
   // Add the data set to the plot.
   plot->AppendTimeSeriesIfNotEmpty(std::move(time_series));
-  plot->AppendTimeSeriesIfNotEmpty(std::move(late_feedback_series));
 
   plot->SetXAxis(config_.CallBeginTimeSec(), config_.CallEndTimeSec(),
                  "Time (s)", kLeftMargin, kRightMargin);
@@ -1933,8 +1934,9 @@ std::unique_ptr<test::NetEqStatsGetter> CreateNetEqTestAndRun(
   callbacks.post_insert_packet = neteq_stats_getter->delay_analyzer();
   callbacks.get_audio_callback = neteq_stats_getter.get();
 
-  test::NetEqTest test(config, decoder_factory, codecs, nullptr,
-                       std::move(input), std::move(output), callbacks);
+  test::NetEqTest test(config, decoder_factory, codecs, /*text_log=*/nullptr,
+                       /*factory=*/nullptr, std::move(input), std::move(output),
+                       callbacks);
   test.Run();
   return neteq_stats_getter;
 }

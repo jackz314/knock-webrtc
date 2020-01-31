@@ -431,9 +431,12 @@ TEST_F(OveruseFrameDetectorTest, UpdatesExistingSamples) {
 TEST_F(OveruseFrameDetectorTest, RunOnTqNormalUsage) {
   TaskQueueForTest queue("OveruseFrameDetectorTestQueue");
 
-  queue.SendTask([&] {
-    overuse_detector_->StartCheckForOveruse(&queue, options_, observer_);
-  });
+  queue.SendTask(
+      [&] {
+        overuse_detector_->StartCheckForOveruse(queue.Get(), options_,
+                                                observer_);
+      },
+      RTC_FROM_HERE);
 
   rtc::Event event;
   // Expect NormalUsage(). When called, stop the |overuse_detector_| and then
@@ -910,9 +913,12 @@ TEST_F(OveruseFrameDetectorTest2, UpdatesExistingSamples) {
 TEST_F(OveruseFrameDetectorTest2, RunOnTqNormalUsage) {
   TaskQueueForTest queue("OveruseFrameDetectorTestQueue");
 
-  queue.SendTask([&] {
-    overuse_detector_->StartCheckForOveruse(&queue, options_, observer_);
-  });
+  queue.SendTask(
+      [&] {
+        overuse_detector_->StartCheckForOveruse(queue.Get(), options_,
+                                                observer_);
+      },
+      RTC_FROM_HERE);
 
   rtc::Event event;
   // Expect NormalUsage(). When called, stop the |overuse_detector_| and then

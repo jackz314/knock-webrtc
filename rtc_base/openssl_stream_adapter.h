@@ -20,7 +20,6 @@
 #include <vector>
 
 #include "rtc_base/buffer.h"
-#include "rtc_base/message_queue.h"
 #include "rtc_base/openssl_identity.h"
 #include "rtc_base/ssl_identity.h"
 #include "rtc_base/ssl_stream_adapter.h"
@@ -96,8 +95,8 @@ class OpenSSLStreamAdapter final : public SSLStreamAdapter {
 
   bool GetSslCipherSuite(int* cipher) override;
 
-  int GetSslVersion() const override;
-
+  SSLProtocolVersion GetSslVersion() const override;
+  bool GetSslVersionBytes(int* version) const override;
   // Key Extractor interface
   bool ExportKeyingMaterial(const std::string& label,
                             const uint8_t* context,

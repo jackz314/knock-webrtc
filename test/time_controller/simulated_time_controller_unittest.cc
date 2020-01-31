@@ -18,6 +18,8 @@
 #include "test/gmock.h"
 #include "test/gtest.h"
 
+#include "rtc_base/event.h"
+
 // NOTE: Since these tests rely on real time behavior, they will be flaky
 // if run on heavily loaded systems.
 namespace webrtc {
@@ -46,7 +48,7 @@ TEST(SimulatedTimeControllerTest, TaskIsStoppedOnStop) {
     return kShortInterval;
   });
   // Sleep long enough to go through the initial phase.
-  time_simulation.Sleep(kShortInterval * (kShortIntervalCount + kMargin));
+  time_simulation.AdvanceTime(kShortInterval * (kShortIntervalCount + kMargin));
   EXPECT_EQ(counter.load(), kShortIntervalCount);
 
   task_queue.PostTask(
@@ -54,7 +56,7 @@ TEST(SimulatedTimeControllerTest, TaskIsStoppedOnStop) {
 
   // Sleep long enough that the task would run at least once more if not
   // stopped.
-  time_simulation.Sleep(kLongInterval * 2);
+  time_simulation.AdvanceTime(kLongInterval * 2);
   EXPECT_EQ(counter.load(), kShortIntervalCount);
 }
 
@@ -73,9 +75,10 @@ TEST(SimulatedTimeControllerTest, TaskCanStopItself) {
       return TimeDelta::ms(2);
     });
   });
-  time_simulation.Sleep(TimeDelta::ms(10));
+  time_simulation.AdvanceTime(TimeDelta::ms(10));
   EXPECT_EQ(counter.load(), 1);
 }
+
 TEST(SimulatedTimeControllerTest, Example) {
   class ObjectOnTaskQueue {
    public:
@@ -110,4 +113,40 @@ TEST(SimulatedTimeControllerTest, Example) {
   };
   task_queue.PostTask(Destructor{std::move(object)});
 }
+
+TEST(SimulatedTimeControllerTest, DelayTaskRunOnTime) {
+  GlobalSimulatedTimeController time_simulation(kStartTime);
+  rtc::TaskQueue task_queue(
+      time_simulation.GetTaskQueueFactory()->CreateTaskQueue(
+          "TestQueue", TaskQueueFactory::Priority::NORMAL));
+
+  bool delay_task_executed = false;
+  task_queue.PostDelayedTask([&] { delay_task_executed = true; }, 10);
+
+  time_simulation.AdvanceTime(TimeDelta::ms(10));
+  EXPECT_TRUE(delay_task_executed);
+}
+
+TEST(SimulatedTimeControllerTest, ThreadYeildsOnInvoke) {
+  GlobalSimulatedTimeController sim(kStartTime);
+  auto main_thread = sim.GetMainThread();
+  auto t2 = sim.CreateThread("thread", nullptr);
+  bool task_has_run = false;
+  // Posting a task to the main thread, this should not run until AdvanceTime is
+  // called.
+  main_thread->PostTask(RTC_FROM_HERE, [&] { task_has_run = true; });
+  t2->Invoke<void>(RTC_FROM_HERE, [] {
+    rtc::Event yield_event;
+    // Wait() triggers YieldExecution() which will runs message processing on
+    // all threads that are not in the yielded set.
+
+    yield_event.Wait(0);
+  });
+  // Since we are doing an invoke from the main thread, we don't expect the main
+  // thread message loop to be processed.
+  EXPECT_FALSE(task_has_run);
+  sim.AdvanceTime(TimeDelta::seconds(1));
+  ASSERT_TRUE(task_has_run);
+}
+
 }  // namespace webrtc

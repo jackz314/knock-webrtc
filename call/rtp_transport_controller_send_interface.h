@@ -44,7 +44,6 @@ class TargetTransferRateObserver;
 class Transport;
 class Module;
 class PacedSender;
-class PacketFeedbackObserver;
 class PacketRouter;
 class RtpVideoSenderInterface;
 class RateLimiter;
@@ -52,7 +51,6 @@ class RtcpBandwidthObserver;
 class RtpPacketSender;
 class SendDelayStats;
 class SendStatisticsProxy;
-class TransportFeedbackObserver;
 
 struct RtpSenderObservers {
   RtcpRttStats* rtcp_rtt_stats;
@@ -129,10 +127,7 @@ class RtpTransportControllerSendInterface {
   virtual void SetPacingFactor(float pacing_factor) = 0;
   virtual void SetQueueTimeLimit(int limit_ms) = 0;
 
-  virtual void RegisterPacketFeedbackObserver(
-      PacketFeedbackObserver* observer) = 0;
-  virtual void DeRegisterPacketFeedbackObserver(
-      PacketFeedbackObserver* observer) = 0;
+  virtual StreamFeedbackProvider* GetStreamFeedbackProvider() = 0;
   virtual void RegisterTargetTransferRateObserver(
       TargetTransferRateObserver* observer) = 0;
   virtual void OnNetworkRouteChanged(
@@ -155,6 +150,7 @@ class RtpTransportControllerSendInterface {
       size_t transport_overhead_per_packet) = 0;
 
   virtual void AccountForAudioPacketsInPacedSender(bool account_for_audio) = 0;
+  virtual void IncludeOverheadInPacedSender() = 0;
 };
 
 }  // namespace webrtc

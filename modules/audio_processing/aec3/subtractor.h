@@ -59,28 +59,26 @@ class Subtractor {
   void ExitInitialState();
 
   // Returns the block-wise frequency responses for the main adaptive filters.
-  // TODO(bugs.webrtc.org/10913): Return the frequency responses for all capture
-  // channels.
-  const std::vector<std::array<float, kFftLengthBy2Plus1>>&
-  FilterFrequencyResponse() const {
-    return main_frequency_response_[0];
+  const std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>&
+  FilterFrequencyResponses() const {
+    return main_frequency_responses_;
   }
 
   // Returns the estimates of the impulse responses for the main adaptive
   // filters.
-  // TODO(bugs.webrtc.org/10913): Return the impulse responses for all capture
-  // channels.
-  const std::vector<float>& FilterImpulseResponse() const {
-    return main_impulse_response_[0];
+  const std::vector<std::vector<float>>& FilterImpulseResponses() const {
+    return main_impulse_responses_;
   }
 
   void DumpFilters() {
-    size_t current_size = main_impulse_response_[0].size();
-    main_impulse_response_[0].resize(main_impulse_response_[0].capacity());
-    data_dumper_->DumpRaw("aec3_subtractor_h_main", main_impulse_response_[0]);
-    main_impulse_response_[0].resize(current_size);
+    data_dumper_->DumpRaw(
+        "aec3_subtractor_h_main",
+        rtc::ArrayView<const float>(
+            main_impulse_responses_[0].data(),
+            GetTimeDomainLength(
+                main_filters_[0]->max_filter_size_partitions())));
 
-    main_filter_[0]->DumpFilter("aec3_subtractor_H_main");
+    main_filters_[0]->DumpFilter("aec3_subtractor_H_main");
     shadow_filter_[0]->DumpFilter("aec3_subtractor_H_shadow");
   }
 
@@ -122,15 +120,15 @@ class Subtractor {
   const EchoCanceller3Config config_;
   const size_t num_capture_channels_;
 
-  std::vector<std::unique_ptr<AdaptiveFirFilter>> main_filter_;
+  std::vector<std::unique_ptr<AdaptiveFirFilter>> main_filters_;
   std::vector<std::unique_ptr<AdaptiveFirFilter>> shadow_filter_;
-  std::vector<std::unique_ptr<MainFilterUpdateGain>> G_main_;
-  std::vector<std::unique_ptr<ShadowFilterUpdateGain>> G_shadow_;
-  std::vector<FilterMisadjustmentEstimator> filter_misadjustment_estimator_;
-  std::vector<size_t> poor_shadow_filter_counter_;
+  std::vector<std::unique_ptr<MainFilterUpdateGain>> main_gains_;
+  std::vector<std::unique_ptr<ShadowFilterUpdateGain>> shadow_gains_;
+  std::vector<FilterMisadjustmentEstimator> filter_misadjustment_estimators_;
+  std::vector<size_t> poor_shadow_filter_counters_;
   std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>
-      main_frequency_response_;
-  std::vector<std::vector<float>> main_impulse_response_;
+      main_frequency_responses_;
+  std::vector<std::vector<float>> main_impulse_responses_;
 };
 
 }  // namespace webrtc
