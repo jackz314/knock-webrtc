@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <string>
@@ -40,7 +41,6 @@ namespace webrtc {
 
 namespace {
 constexpr size_t kRedForFecHeaderLength = 1;
-constexpr size_t kRtpSequenceNumberMapMaxEntries = 1 << 13;
 constexpr int64_t kMaxUnretransmittableFrameIntervalMs = 33 * 4;
 
 // This is experimental field trial to exclude transport sequence number from
@@ -240,30 +240,11 @@ const char* FrameTypeToString(VideoFrameType frame_type) {
 }
 #endif
 
-}  // namespace
+bool IsNoopDelay(const PlayoutDelay& delay) {
+  return delay.min_ms == -1 && delay.max_ms == -1;
+}
 
-RTPSenderVideo::RTPSenderVideo(Clock* clock,
-                               RTPSender* rtp_sender,
-                               FlexfecSender* flexfec_sender,
-                               PlayoutDelayOracle* playout_delay_oracle,
-                               FrameEncryptorInterface* frame_encryptor,
-                               bool require_frame_encryption,
-                               bool need_rtp_packet_infos,
-                               bool enable_retransmit_all_layers,
-                               const WebRtcKeyValueConfig& field_trials)
-    : RTPSenderVideo([&] {
-        Config config;
-        config.clock = clock;
-        config.rtp_sender = rtp_sender;
-        config.flexfec_sender = flexfec_sender;
-        config.playout_delay_oracle = playout_delay_oracle;
-        config.frame_encryptor = frame_encryptor;
-        config.require_frame_encryption = require_frame_encryption;
-        config.need_rtp_packet_infos = need_rtp_packet_infos;
-        config.enable_retransmit_all_layers = enable_retransmit_all_layers;
-        config.field_trials = &field_trials;
-        return config;
-      }()) {}
+}  // namespace
 
 RTPSenderVideo::RTPSenderVideo(const Config& config)
     : rtp_sender_(config.rtp_sender),
@@ -274,11 +255,8 @@ RTPSenderVideo::RTPSenderVideo(const Config& config)
               : (kRetransmitBaseLayer | kConditionallyRetransmitHigherLayers)),
       last_rotation_(kVideoRotation_0),
       transmit_color_space_next_frame_(false),
-      playout_delay_oracle_(config.playout_delay_oracle),
-      rtp_sequence_number_map_(config.need_rtp_packet_infos
-                                   ? std::make_unique<RtpSequenceNumberMap>(
-                                         kRtpSequenceNumberMapMaxEntries)
-                                   : nullptr),
+      current_playout_delay_{-1, -1},
+      playout_delay_pending_(false),
       red_payload_type_(config.red_payload_type),
       ulpfec_payload_type_(config.ulpfec_payload_type),
       flexfec_sender_(config.flexfec_sender),
@@ -296,9 +274,7 @@ RTPSenderVideo::RTPSenderVideo(const Config& config)
           config.field_trials
               ->Lookup(kExcludeTransportSequenceNumberFromFecFieldTrial)
               .find("Enabled") == 0),
-      absolute_capture_time_sender_(config.clock) {
-  RTC_DCHECK(playout_delay_oracle_);
-}
+      absolute_capture_time_sender_(config.clock) {}
 
 RTPSenderVideo::~RTPSenderVideo() {}
 
@@ -346,7 +322,7 @@ void RTPSenderVideo::AppendAsRedMaybeWithUlpfec(
   }
 
   // Send |red_packet| instead of |packet| for allocated sequence number.
-  red_packet->set_packet_type(RtpPacketToSend::Type::kVideo);
+  red_packet->set_packet_type(RtpPacketMediaType::kVideo);
   red_packet->set_allow_retransmission(media_packet->allow_retransmission());
   packets->emplace_back(std::move(red_packet));
 
@@ -357,7 +333,7 @@ void RTPSenderVideo::AppendAsRedMaybeWithUlpfec(
         new RtpPacketToSend(*media_packet));
     RTC_CHECK(rtp_packet->Parse(fec_packet->data(), fec_packet->length()));
     rtp_packet->set_capture_time_ms(media_packet->capture_time_ms());
-    rtp_packet->set_packet_type(RtpPacketToSend::Type::kForwardErrorCorrection);
+    rtp_packet->set_packet_type(RtpPacketMediaType::kForwardErrorCorrection);
     rtp_packet->set_allow_retransmission(false);
     RTC_DCHECK_EQ(fec_packet->length(), rtp_packet->size());
     packets->emplace_back(std::move(rtp_packet));
@@ -372,8 +348,7 @@ void RTPSenderVideo::GenerateAndAppendFlexfec(
     std::vector<std::unique_ptr<RtpPacketToSend>> fec_packets =
         flexfec_sender_->GetFecPackets();
     for (auto& fec_packet : fec_packets) {
-      fec_packet->set_packet_type(
-          RtpPacketToSend::Type::kForwardErrorCorrection);
+      fec_packet->set_packet_type(RtpPacketMediaType::kForwardErrorCorrection);
       fec_packet->set_allow_retransmission(false);
       packets->emplace_back(std::move(fec_packet));
     }
@@ -386,8 +361,7 @@ void RTPSenderVideo::LogAndSendToNetwork(
   int64_t now_ms = clock_->TimeInMilliseconds();
 #if BWE_TEST_LOGGING_COMPILE_TIME_ENABLE
   for (const auto& packet : packets) {
-    if (packet->packet_type() ==
-        RtpPacketToSend::Type::kForwardErrorCorrection) {
+    if (packet->packet_type() == RtpPacketMediaType::kForwardErrorCorrection) {
       const uint32_t ssrc = packet->Ssrc();
       BWE_TEST_LOGGING_PLOT_WITH_SSRC(1, "VideoFecBitrate_kbps", now_ms,
                                       FecOverheadRate() / 1000, ssrc);
@@ -400,11 +374,11 @@ void RTPSenderVideo::LogAndSendToNetwork(
     size_t packetized_payload_size = 0;
     for (const auto& packet : packets) {
       switch (*packet->packet_type()) {
-        case RtpPacketToSend::Type::kVideo:
+        case RtpPacketMediaType::kVideo:
           video_bitrate_.Update(packet->size(), now_ms);
           packetized_payload_size += packet->payload_size();
           break;
-        case RtpPacketToSend::Type::kForwardErrorCorrection:
+        case RtpPacketMediaType::kForwardErrorCorrection:
           fec_bitrate_.Update(packet->size(), clock_->TimeInMilliseconds());
           break;
         default:
@@ -521,8 +495,16 @@ bool RTPSenderVideo::SendVideo(
       video_header.codec == kVideoCodecH264 &&
       video_header.frame_marking.temporal_id != kNoTemporalIdx;
 
+  MaybeUpdateCurrentPlayoutDelay(video_header);
+  if (video_header.frame_type == VideoFrameType::kVideoFrameKey &&
+      !IsNoopDelay(current_playout_delay_)) {
+    // Force playout delay on key-frames, if set.
+    playout_delay_pending_ = true;
+  }
   const absl::optional<PlayoutDelay> playout_delay =
-      playout_delay_oracle_->PlayoutDelayToSend(video_header.playout_delay);
+      playout_delay_pending_
+          ? absl::optional<PlayoutDelay>(current_playout_delay_)
+          : absl::nullopt;
 
   // According to
   // http://www.etsi.org/deliver/etsi_ts/126100_126199/126114/12.07.00_60/
@@ -651,6 +633,15 @@ bool RTPSenderVideo::SendVideo(
     MinimizeDescriptor(&video_header);
   }
 
+  if (video_header.frame_type == VideoFrameType::kVideoFrameKey ||
+      (IsBaseLayer(video_header) &&
+       !(video_header.generic.has_value() ? video_header.generic->discardable
+                                          : false))) {
+    // This frame has guaranteed delivery, no need to populate playout
+    // delay extensions until it changes again.
+    playout_delay_pending_ = false;
+  }
+
   // TODO(benwright@webrtc.org) - Allocate enough to always encrypt inline.
   rtc::Buffer encrypted_video_payload;
   if (frame_encryptor_ != nullptr) {
@@ -711,7 +702,6 @@ bool RTPSenderVideo::SendVideo(
   if (num_packets == 0)
     return false;
 
-  uint16_t first_sequence_number;
   bool first_frame = first_frame_sent_();
   std::vector<std::unique_ptr<RtpPacketToSend>> rtp_packets;
   for (size_t i = 0; i < num_packets; ++i) {
@@ -735,20 +725,14 @@ bool RTPSenderVideo::SendVideo(
       expected_payload_capacity = limits.max_payload_len;
     }
 
+    packet->set_first_packet_of_frame(i == 0);
+
     if (!packetizer->NextPacket(packet.get()))
       return false;
     RTC_DCHECK_LE(packet->payload_size(), expected_payload_capacity);
     if (!rtp_sender_->AssignSequenceNumber(packet.get()))
       return false;
 
-    if (rtp_sequence_number_map_ && i == 0) {
-      first_sequence_number = packet->SequenceNumber();
-    }
-
-    if (i == 0) {
-      playout_delay_oracle_->OnSentPacket(packet->SequenceNumber(),
-                                          playout_delay);
-    }
     // No FEC protection for upper temporal layers, if used.
     bool protect_packet = temporal_id == 0 || temporal_id == kNoTemporalIdx;
 
@@ -763,7 +747,7 @@ bool RTPSenderVideo::SendVideo(
       AppendAsRedMaybeWithUlpfec(std::move(packet), protect_packet,
                                  &rtp_packets);
     } else {
-      packet->set_packet_type(RtpPacketToSend::Type::kVideo);
+      packet->set_packet_type(RtpPacketMediaType::kVideo);
       const RtpPacketToSend& media_packet = *packet;
       rtp_packets.emplace_back(std::move(packet));
       if (flexfec_enabled()) {
@@ -788,13 +772,6 @@ bool RTPSenderVideo::SendVideo(
     }
   }
 
-  if (rtp_sequence_number_map_) {
-    const uint32_t timestamp = rtp_timestamp - rtp_sender_->TimestampOffset();
-    rtc::CritScope cs(&crit_);
-    rtp_sequence_number_map_->InsertFrame(first_sequence_number, num_packets,
-                                          timestamp);
-  }
-
   LogAndSendToNetwork(std::move(rtp_packets), unpacketized_payload_size);
 
   TRACE_EVENT_ASYNC_END1("webrtc", "Video", capture_time_ms, "timestamp",
@@ -816,37 +793,6 @@ uint32_t RTPSenderVideo::PacketizationOverheadBps() const {
   rtc::CritScope cs(&stats_crit_);
   return packetization_overhead_bitrate_.Rate(clock_->TimeInMilliseconds())
       .value_or(0);
-}
-
-std::vector<RtpSequenceNumberMap::Info> RTPSenderVideo::GetSentRtpPacketInfos(
-    rtc::ArrayView<const uint16_t> sequence_numbers) const {
-  RTC_DCHECK(!sequence_numbers.empty());
-
-  std::vector<RtpSequenceNumberMap::Info> results;
-  if (!rtp_sequence_number_map_) {
-    return results;
-  }
-  results.reserve(sequence_numbers.size());
-
-  {
-    rtc::CritScope cs(&crit_);
-    for (uint16_t sequence_number : sequence_numbers) {
-      const absl::optional<RtpSequenceNumberMap::Info> info =
-          rtp_sequence_number_map_->Get(sequence_number);
-      if (!info) {
-        // The empty vector will be returned. We can delay the clearing
-        // of the vector until after we exit the critical section.
-        break;
-      }
-      results.push_back(*info);
-    }
-  }
-
-  if (results.size() != sequence_numbers.size()) {
-    results.clear();  // Some sequence number was not found.
-  }
-
-  return results;
 }
 
 bool RTPSenderVideo::AllowRetransmission(
@@ -940,6 +886,54 @@ bool RTPSenderVideo::UpdateConditionalRetransmit(
   }
 
   return false;
+}
+
+void RTPSenderVideo::MaybeUpdateCurrentPlayoutDelay(
+    const RTPVideoHeader& header) {
+  if (IsNoopDelay(header.playout_delay)) {
+    return;
+  }
+
+  PlayoutDelay requested_delay = header.playout_delay;
+
+  if (requested_delay.min_ms > PlayoutDelayLimits::kMaxMs ||
+      requested_delay.max_ms > PlayoutDelayLimits::kMaxMs) {
+    RTC_DLOG(LS_ERROR)
+        << "Requested playout delay values out of range, ignored";
+    return;
+  }
+  if (requested_delay.max_ms != -1 &&
+      requested_delay.min_ms > requested_delay.max_ms) {
+    RTC_DLOG(LS_ERROR) << "Requested playout delay values out of order";
+    return;
+  }
+
+  if (!playout_delay_pending_) {
+    current_playout_delay_ = requested_delay;
+    playout_delay_pending_ = true;
+    return;
+  }
+
+  if ((requested_delay.min_ms == -1 ||
+       requested_delay.min_ms == current_playout_delay_.min_ms) &&
+      (requested_delay.max_ms == -1 ||
+       requested_delay.max_ms == current_playout_delay_.max_ms)) {
+    // No change, ignore.
+    return;
+  }
+
+  if (requested_delay.min_ms == -1) {
+    RTC_DCHECK_GE(requested_delay.max_ms, 0);
+    requested_delay.min_ms =
+        std::min(current_playout_delay_.min_ms, requested_delay.max_ms);
+  }
+  if (requested_delay.max_ms == -1) {
+    requested_delay.max_ms =
+        std::max(current_playout_delay_.max_ms, requested_delay.min_ms);
+  }
+
+  current_playout_delay_ = requested_delay;
+  playout_delay_pending_ = true;
 }
 
 }  // namespace webrtc

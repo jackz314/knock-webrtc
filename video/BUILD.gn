@@ -176,6 +176,8 @@ rtc_library("video_stream_encoder_impl") {
 
   # visibility = [ "../api/video:video_stream_encoder_create" ]
   sources = [
+    "encode_usage_resource.cc",
+    "encode_usage_resource.h",
     "encoder_bitrate_adjuster.cc",
     "encoder_bitrate_adjuster.h",
     "encoder_overshoot_detector.cc",
@@ -186,6 +188,8 @@ rtc_library("video_stream_encoder_impl") {
     "overuse_frame_detector.h",
     "overuse_frame_detector_resource_adaptation_module.cc",
     "overuse_frame_detector_resource_adaptation_module.h",
+    "quality_scaler_resource.cc",
+    "quality_scaler_resource.h",
     "video_source_sink_controller.cc",
     "video_source_sink_controller.h",
     "video_stream_encoder.cc",
@@ -467,41 +471,6 @@ if (rtc_include_tests) {
     ]
   }
 
-  rtc_executable("video_replay") {
-    testonly = true
-    sources = [ "video_replay.cc" ]
-    deps = [
-      "../api/rtc_event_log",
-      "../api/task_queue:default_task_queue_factory",
-      "../api/test/video:function_video_factory",
-      "../api/transport:field_trial_based_config",
-      "../api/video_codecs:video_codecs_api",
-      "../call",
-      "../call:call_interfaces",
-      "../common_video",
-      "../media:rtc_internal_video_codecs",
-      "../rtc_base:checks",
-      "../rtc_base:rtc_json",
-      "../rtc_base:stringutils",
-      "../rtc_base:timeutils",
-      "../system_wrappers",
-      "../test:call_config_utils",
-      "../test:encoder_settings",
-      "../test:fake_video_codecs",
-      "../test:null_transport",
-      "../test:rtp_test_utils",
-      "../test:run_test",
-      "../test:run_test_interface",
-      "../test:test_common",
-      "../test:test_renderer",
-      "../test:test_support",
-      "../test:video_test_common",
-      "../test:video_test_support",
-      "//third_party/abseil-cpp/absl/flags:flag",
-      "//third_party/abseil-cpp/absl/flags:parse",
-    ]
-  }
-
   # TODO(pbos): Rename test suite.
   rtc_library("video_tests") {
     testonly = true
@@ -565,6 +534,7 @@ if (rtc_include_tests) {
       "../api:libjingle_peerconnection_api",
       "../api:mock_fec_controller_override",
       "../api:mock_frame_decryptor",
+      "../api:mock_video_encoder",
       "../api:rtp_headers",
       "../api:rtp_parameters",
       "../api:scoped_refptr",

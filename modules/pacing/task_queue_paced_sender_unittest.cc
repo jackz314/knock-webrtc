@@ -51,7 +51,7 @@ namespace test {
 class TaskQueuePacedSenderTest : public ::testing::Test {
  public:
   TaskQueuePacedSenderTest()
-      : time_controller_(Timestamp::ms(1234)),
+      : time_controller_(Timestamp::Millis(1234)),
         pacer_(time_controller_.GetClock(),
                &packet_router_,
                /*event_log=*/nullptr,
@@ -59,21 +59,21 @@ class TaskQueuePacedSenderTest : public ::testing::Test {
                time_controller_.GetTaskQueueFactory()) {}
 
  protected:
-  std::unique_ptr<RtpPacketToSend> BuildRtpPacket(RtpPacketToSend::Type type) {
+  std::unique_ptr<RtpPacketToSend> BuildRtpPacket(RtpPacketMediaType type) {
     auto packet = std::make_unique<RtpPacketToSend>(nullptr);
     packet->set_packet_type(type);
     switch (type) {
-      case RtpPacketToSend::Type::kAudio:
+      case RtpPacketMediaType::kAudio:
         packet->SetSsrc(kAudioSsrc);
         break;
-      case RtpPacketToSend::Type::kVideo:
+      case RtpPacketMediaType::kVideo:
         packet->SetSsrc(kVideoSsrc);
         break;
-      case RtpPacketToSend::Type::kRetransmission:
-      case RtpPacketToSend::Type::kPadding:
+      case RtpPacketMediaType::kRetransmission:
+      case RtpPacketMediaType::kPadding:
         packet->SetSsrc(kVideoRtxSsrc);
         break;
-      case RtpPacketToSend::Type::kForwardErrorCorrection:
+      case RtpPacketMediaType::kForwardErrorCorrection:
         packet->SetSsrc(kFlexFecSsrc);
         break;
     }
@@ -83,7 +83,7 @@ class TaskQueuePacedSenderTest : public ::testing::Test {
   }
 
   std::vector<std::unique_ptr<RtpPacketToSend>> GeneratePackets(
-      RtpPacketToSend::Type type,
+      RtpPacketMediaType type,
       size_t num_packets) {
     std::vector<std::unique_ptr<RtpPacketToSend>> packets;
     for (size_t i = 0; i < num_packets; ++i) {
@@ -105,7 +105,7 @@ TEST_F(TaskQueuePacedSenderTest, PacesPackets) {
   pacer_.SetPacingRates(DataRate::bps(kDefaultPacketSize * 8 * kPacketsToSend),
                         DataRate::Zero());
   pacer_.EnqueuePackets(
-      GeneratePackets(RtpPacketToSend::Type::kVideo, kPacketsToSend));
+      GeneratePackets(RtpPacketMediaType::kVideo, kPacketsToSend));
 
   // Expect all of them to be sent.
   size_t packets_sent = 0;
@@ -123,7 +123,7 @@ TEST_F(TaskQueuePacedSenderTest, PacesPackets) {
 
   // Packets should be sent over a period of close to 1s. Expect a little lower
   // than this since initial probing is a bit quicker.
-  time_controller_.AdvanceTime(TimeDelta::seconds(1));
+  time_controller_.AdvanceTime(TimeDelta::Seconds(1));
   EXPECT_EQ(packets_sent, kPacketsToSend);
   ASSERT_TRUE(end_time.IsFinite());
   EXPECT_NEAR((end_time - start_time).ms<double>(), 1000.0, 50.0);
@@ -139,8 +139,8 @@ TEST_F(TaskQueuePacedSenderTest, ReschedulesProcessOnRateChange) {
   // Send some initial packets to be rid of any probes.
   EXPECT_CALL(packet_router_, SendPacket).Times(kPacketsPerSecond);
   pacer_.EnqueuePackets(
-      GeneratePackets(RtpPacketToSend::Type::kVideo, kPacketsPerSecond));
-  time_controller_.AdvanceTime(TimeDelta::seconds(1));
+      GeneratePackets(RtpPacketMediaType::kVideo, kPacketsPerSecond));
+  time_controller_.AdvanceTime(TimeDelta::Seconds(1));
 
   // Insert three packets, and record send time of each of them.
   // After the second packet is sent, double the send rate so we can
@@ -163,8 +163,8 @@ TEST_F(TaskQueuePacedSenderTest, ReschedulesProcessOnRateChange) {
         }
       });
 
-  pacer_.EnqueuePackets(GeneratePackets(RtpPacketToSend::Type::kVideo, 3));
-  time_controller_.AdvanceTime(TimeDelta::ms(500));
+  pacer_.EnqueuePackets(GeneratePackets(RtpPacketMediaType::kVideo, 3));
+  time_controller_.AdvanceTime(TimeDelta::Millis(500));
   ASSERT_TRUE(third_packet_time.IsFinite());
   EXPECT_NEAR((second_packet_time - first_packet_time).ms<double>(), 200.0,
               1.0);

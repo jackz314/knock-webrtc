@@ -34,6 +34,24 @@ rtc_library("encoded_frame") {
   ]
 }
 
+rtc_library("frame_dependencies_calculator") {
+  sources = [
+    "frame_dependencies_calculator.cc",
+    "frame_dependencies_calculator.h",
+  ]
+
+  deps = [
+    "../../api:array_view",
+    "../../api/video:video_frame_type",
+    "../../common_video/generic_frame_descriptor",
+    "../../rtc_base:checks",
+    "../../rtc_base:logging",
+    "//third_party/abseil-cpp/absl/algorithm:container",
+    "//third_party/abseil-cpp/absl/container:inlined_vector",
+    "//third_party/abseil-cpp/absl/types:optional",
+  ]
+}
+
 rtc_library("nack_module") {
   visibility = [ "*" ]
   sources = [
@@ -248,9 +266,7 @@ rtc_source_set("codec_globals_headers") {
     "codecs/vp9/include/vp9_globals.h",
   ]
 
-  deps = [
-    "../../rtc_base:checks",
-  ]
+  deps = [ "../../rtc_base:checks" ]
 }
 
 rtc_library("video_coding_utility") {
@@ -258,8 +274,6 @@ rtc_library("video_coding_utility") {
   sources = [
     "utility/decoded_frames_history.cc",
     "utility/decoded_frames_history.h",
-    "utility/default_video_bitrate_allocator.cc",
-    "utility/default_video_bitrate_allocator.h",
     "utility/frame_dropper.cc",
     "utility/frame_dropper.h",
     "utility/framerate_controller.cc",
@@ -671,9 +685,7 @@ if (rtc_include_tests) {
       bundle_data("video_coding_modules_tests_resources_bundle_data") {
         testonly = true
         sources = video_coding_modules_tests_resources
-        outputs = [
-          "{{bundle_resources_dir}}/{{source_file_part}}",
-        ]
+        outputs = [ "{{bundle_resources_dir}}/{{source_file_part}}" ]
       }
     }
   }
@@ -831,11 +843,11 @@ if (rtc_include_tests) {
       "decoding_state_unittest.cc",
       "fec_controller_unittest.cc",
       "frame_buffer2_unittest.cc",
+      "frame_dependencies_calculator_unittest.cc",
       "generic_decoder_unittest.cc",
       "h264_sprop_parameter_sets_unittest.cc",
       "h264_sps_pps_tracker_unittest.cc",
       "histogram_unittest.cc",
-      "include/mock/mock_vcm_callbacks.h",
       "jitter_buffer_unittest.cc",
       "jitter_estimator_tests.cc",
       "loss_notification_controller_unittest.cc",
@@ -849,7 +861,6 @@ if (rtc_include_tests) {
       "timing_unittest.cc",
       "unique_timestamp_counter_unittest.cc",
       "utility/decoded_frames_history_unittest.cc",
-      "utility/default_video_bitrate_allocator_unittest.cc",
       "utility/frame_dropper_unittest.cc",
       "utility/framerate_controller_unittest.cc",
       "utility/ivf_file_reader_unittest.cc",
@@ -869,6 +880,7 @@ if (rtc_include_tests) {
     deps = [
       ":codec_globals_headers",
       ":encoded_frame",
+      ":frame_dependencies_calculator",
       ":nack_module",
       ":simulcast_test_fixture_impl",
       ":video_codec_interface",
@@ -902,10 +914,12 @@ if (rtc_include_tests) {
       "../../api/video:video_bitrate_allocator_factory",
       "../../api/video:video_frame",
       "../../api/video:video_frame_i420",
+      "../../api/video:video_frame_type",
       "../../api/video:video_rtp_headers",
       "../../api/video_codecs:video_codecs_api",
       "../../api/video_codecs:vp8_temporal_layers_factory",
       "../../common_video",
+      "../../common_video/generic_frame_descriptor",
       "../../common_video/test:utilities",
       "../../media:rtc_media_base",
       "../../rtc_base",

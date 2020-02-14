@@ -29,11 +29,8 @@
 #include "call/adaptation/resource_adaptation_module_interface.h"
 #include "call/adaptation/video_source_restrictions.h"
 #include "modules/video_coding/utility/frame_dropper.h"
-#include "modules/video_coding/utility/quality_scaler.h"
 #include "rtc_base/critical_section.h"
 #include "rtc_base/event.h"
-#include "rtc_base/experiments/quality_rampup_experiment.h"
-#include "rtc_base/experiments/quality_scaler_settings.h"
 #include "rtc_base/experiments/rate_control_settings.h"
 #include "rtc_base/numerics/exp_filter.h"
 #include "rtc_base/race_checker.h"
@@ -110,19 +107,24 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
                         DataRate stable_target_bitrate,
                         DataRate target_headroom,
                         uint8_t fraction_lost,
-                        int64_t round_trip_time_ms) override;
+                        int64_t round_trip_time_ms,
+                        double cwnd_reduce_ratio) override;
+
+  DataRate UpdateTargetBitrate(DataRate target_bitrate,
+                               double cwnd_reduce_ratio);
 
  protected:
   // Used for testing. For example the |ScalingObserverInterface| methods must
   // be called on |encoder_queue_|.
   rtc::TaskQueue* encoder_queue() { return &encoder_queue_; }
 
-  // These methods are protected for easier testing.
-  // TODO(hbos): When "DropDueToSize" no longer causes TriggerAdaptDown(), these
-  // methods are only used for testing and can be removed in favor of the test
-  // invoking AdaptUp() or AdaptDown() on a test-injected adaptation module.
-  void TriggerAdaptUp(AdaptationObserverInterface::AdaptReason reason);
-  bool TriggerAdaptDown(AdaptationObserverInterface::AdaptReason reason);
+  // TODO(https://crbug.com/webrtc/11222): When the concept of "resources" that
+  // can be overused or underused has materialized, trigger overuse/underuse by
+  // injecting a fake Resource instead and remove these methods.
+  void OnResourceUnderuseForTesting(
+      AdaptationObserverInterface::AdaptReason reason);
+  bool OnResourceOveruseForTesting(
+      AdaptationObserverInterface::AdaptReason reason);
 
   void OnVideoSourceRestrictionsUpdated(
       VideoSourceRestrictions restrictions) override;
@@ -161,8 +163,6 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
 
   void ReconfigureEncoder() RTC_RUN_ON(&encoder_queue_);
 
-  void ConfigureQualityScaler(const VideoEncoder::EncoderInfo& encoder_info);
-
   // Implements VideoSinkInterface.
   void OnFrame(const VideoFrame& video_frame) override;
   void OnDiscardedFrame() override;
@@ -175,7 +175,6 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
   // Indicates wether frame should be dropped because the pixel count is too
   // large for the current bitrate configuration.
   bool DropDueToSize(uint32_t pixel_count) const RTC_RUN_ON(&encoder_queue_);
-  bool TryQualityRampup(int64_t now_ms) RTC_RUN_ON(&encoder_queue_);
 
   // Implements EncodedImageCallback.
   EncodedImageCallback::Result OnEncodedImage(
@@ -213,19 +212,15 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
   rtc::Event shutdown_event_;
 
   const uint32_t number_of_cores_;
-  // Counts how many frames we've dropped in the initial framedrop phase.
-  int initial_framedrop_;
-  bool quality_rampup_done_ RTC_GUARDED_BY(&encoder_queue_);
-  QualityRampupExperiment quality_rampup_experiment_
-      RTC_GUARDED_BY(&encoder_queue_);
 
   const bool quality_scaling_experiment_enabled_;
 
   EncoderSink* sink_;
   const VideoStreamEncoderSettings settings_;
   const RateControlSettings rate_control_settings_;
-  const QualityScalerSettings quality_scaler_settings_;
 
+  std::unique_ptr<VideoEncoderFactory::EncoderSelectorInterface> const
+      encoder_selector_;
   VideoStreamEncoderObserver* const encoder_stats_observer_;
   // |thread_checker_| checks that public methods that are related to lifetime
   // of VideoStreamEncoder are called on the same thread.
@@ -252,9 +247,6 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
   int crop_height_ RTC_GUARDED_BY(&encoder_queue_);
   absl::optional<uint32_t> encoder_target_bitrate_bps_
       RTC_GUARDED_BY(&encoder_queue_);
-  int set_start_bitrate_bps_ RTC_GUARDED_BY(&encoder_queue_);
-  int64_t set_start_bitrate_time_ms_ RTC_GUARDED_BY(&encoder_queue_);
-  bool has_seen_first_bwe_drop_ RTC_GUARDED_BY(&encoder_queue_);
   size_t max_data_payload_length_ RTC_GUARDED_BY(&encoder_queue_);
   absl::optional<EncoderRateSettings> last_encoder_rate_settings_
       RTC_GUARDED_BY(&encoder_queue_);
@@ -279,7 +271,8 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
 
   int64_t last_frame_log_ms_ RTC_GUARDED_BY(incoming_frame_race_checker_);
   int captured_frame_count_ RTC_GUARDED_BY(&encoder_queue_);
-  int dropped_frame_count_ RTC_GUARDED_BY(&encoder_queue_);
+  int dropped_frame_cwnd_pushback_count_ RTC_GUARDED_BY(&encoder_queue_);
+  int dropped_frame_encoder_block_count_ RTC_GUARDED_BY(&encoder_queue_);
   absl::optional<VideoFrame> pending_frame_ RTC_GUARDED_BY(&encoder_queue_);
   int64_t pending_frame_post_time_us_ RTC_GUARDED_BY(&encoder_queue_);
 
@@ -326,6 +319,12 @@ class VideoStreamEncoder : public VideoStreamEncoderInterface,
   // OnEncodedImage(), which is only called by one thread but not necessarily
   // the worker thread.
   std::atomic<int> pending_frame_drops_;
+
+  // Congestion window frame drop ratio (drop 1 in every
+  // cwnd_frame_drop_interval_ frames).
+  absl::optional<int> cwnd_frame_drop_interval_ RTC_GUARDED_BY(&encoder_queue_);
+  // Frame counter for congestion window frame drop.
+  int cwnd_frame_counter_ RTC_GUARDED_BY(&encoder_queue_);
 
   std::unique_ptr<EncoderBitrateAdjuster> bitrate_adjuster_
       RTC_GUARDED_BY(&encoder_queue_);

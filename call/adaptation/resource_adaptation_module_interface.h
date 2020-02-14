@@ -86,12 +86,18 @@ class ResourceAdaptationModuleInterface {
   virtual void SetDegradationPreference(
       DegradationPreference degradation_preference) = 0;
   virtual void SetEncoderSettings(EncoderSettings encoder_settings) = 0;
-  virtual void SetEncoderTargetBitrate(
-      absl::optional<uint32_t> target_bitrate_bps) = 0;
-  // Removes all restrictions; the module will need to adapt all over again.
-  // TODO(hbos): It's not clear why anybody should be able to tell the module to
-  // reset like this; can we get rid of this method?
-  virtual void ResetVideoSourceRestrictions() = 0;
+  // TODO(bugs.webrtc.org/11222): This function shouldn't be needed, start
+  // bitrates should be apart of the constructor ideally. See the comment on
+  // VideoStreamEncoderInterface::SetStartBitrate.
+  virtual void SetStartBitrate(DataRate start_bitrate) = 0;
+  virtual void SetTargetBitrate(DataRate target_bitrate) = 0;
+  // The encoder rates are the target encoder bitrate distributed across spatial
+  // and temporal layers. This may be different than target bitrate depending on
+  // encoder configuration, e.g. if we can encode at desired quality in less
+  // than the allowed target bitrate or if the encoder has not been initialized
+  // yet.
+  virtual void SetEncoderRates(
+      const VideoEncoder::RateControlParameters& encoder_rates) = 0;
 
   // The following methods correspond to the pipeline that a frame goes through.
   // Note that if the encoder is parallelized, multiple frames may be processed
@@ -113,19 +119,29 @@ class ResourceAdaptationModuleInterface {
   // TODO(hbos): If we take frame rate into account perhaps it would be valid to
   // adapt down in frame rate as well.
   virtual void OnFrameDroppedDueToSize() = 0;
-  // 2.ii) An input frame is about to be encoded. It may have been cropped and
+  // 2.ii) If the frame will not be dropped due to size then signal that it may
+  // get encoded. However the frame is not guaranteed to be encoded right away
+  // or ever (for example if encoding is paused).
+  // TODO(eshr): Try replace OnMaybeEncodeFrame and merge behaviour into
+  // EncodeStarted.
+  // TODO(eshr): Try to merge OnFrame, OnFrameDroppedDueToSize, and
+  // OnMaybeEncode frame into one method.
+  virtual void OnMaybeEncodeFrame() = 0;
+  // 2.iii) An input frame is about to be encoded. It may have been cropped and
   // have different dimensions than what was observed at OnFrame(). Next
   // up: encoding completes or fails, see OnEncodeCompleted(). There is
   // currently no signal for encode failure.
   virtual void OnEncodeStarted(const VideoFrame& cropped_frame,
                                int64_t time_when_first_seen_us) = 0;
-  // 3. The frame has successfully completed encoding. Next up: The encoded
+  // 3.i) The frame has successfully completed encoding. Next up: The encoded
   // frame is dropped or packetized and sent over the network. There is
   // currently no signal what happens beyond this point.
-  virtual void OnEncodeCompleted(uint32_t timestamp,
+  virtual void OnEncodeCompleted(const EncodedImage& encoded_image,
                                  int64_t time_sent_in_us,
-                                 int64_t capture_time_us,
                                  absl::optional<int> encode_duration_us) = 0;
+  // A frame was dropped at any point in the pipeline. This may come from
+  // the encoder, or elsewhere, like a frame dropper or frame size check.
+  virtual void OnFrameDropped(EncodedImageCallback::DropReason reason) = 0;
 };
 
 }  // namespace webrtc

@@ -118,9 +118,7 @@ class RTC_EXPORT RTCCodecStats final : public RTCStats {
   RTCStatsMember<uint32_t> payload_type;
   RTCStatsMember<std::string> mime_type;
   RTCStatsMember<uint32_t> clock_rate;
-  // TODO(hbos): Collect and populate this value. https://bugs.webrtc.org/7061
   RTCStatsMember<uint32_t> channels;
-  // TODO(hbos): Collect and populate this value. https://bugs.webrtc.org/7061
   RTCStatsMember<std::string> sdp_fmtp_line;
 };
 
@@ -294,9 +292,6 @@ class RTC_EXPORT RTCMediaStreamTrackStats final : public RTCStats {
   RTCStatsMember<bool> detached;
   // See |RTCMediaStreamTrackKind| for valid values.
   RTCStatsMember<std::string> kind;
-  // TODO(gustaf): Implement jitter_buffer_delay for video (currently
-  // implemented for audio only).
-  // https://crbug.com/webrtc/8318
   RTCStatsMember<double> jitter_buffer_delay;
   RTCStatsMember<uint64_t> jitter_buffer_emitted_count;
   // Video-only members

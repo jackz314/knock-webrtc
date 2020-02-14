@@ -20,6 +20,7 @@
 #include "absl/base/macros.h"
 #include "api/task_queue/task_queue_base.h"
 #include "api/video/video_source_interface.h"
+#include "call/adaptation/resource.h"
 #include "call/adaptation/video_source_restrictions.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/numerics/safe_conversions.h"
@@ -71,9 +72,10 @@ VideoSourceRestrictions ApplyDegradationPreference(
 // VideoSourceRestrictor is responsible for keeping track of current
 // VideoSourceRestrictions and how to modify them in response to adapting up or
 // down. It is not reponsible for determining when we should adapt up or down -
-// for that, see OveruseFrameDetectorResourceAdaptationModule::AdaptUp() and
-// AdaptDown() - only how to modify the source/sink restrictions when this
-// happens. Note that it is also not responsible for reconfigruring the
+// for that, see
+// OveruseFrameDetectorResourceAdaptationModule::OnResourceUnderuse() and
+// OnResourceOveruse() - only how to modify the source/sink restrictions when
+// this happens. Note that it is also not responsible for reconfigruring the
 // source/sink, it is only a keeper of desired restrictions.
 class OveruseFrameDetectorResourceAdaptationModule::VideoSourceRestrictor {
  public:
@@ -217,136 +219,189 @@ class OveruseFrameDetectorResourceAdaptationModule::VideoSourceRestrictor {
   RTC_DISALLOW_COPY_AND_ASSIGN(VideoSourceRestrictor);
 };
 
-// Class holding adaptation information.
-OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::AdaptCounter() {
-  fps_counters_.resize(kScaleReasonSize);
-  resolution_counters_.resize(kScaleReasonSize);
-  static_assert(kScaleReasonSize == 2, "Update MoveCount.");
-}
-
-OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::~AdaptCounter() {}
-
-std::string
-OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::ToString() const {
-  rtc::StringBuilder ss;
-  ss << "Downgrade counts: fps: {" << ToString(fps_counters_);
-  ss << "}, resolution: {" << ToString(resolution_counters_) << "}";
-  return ss.Release();
-}
-
-VideoStreamEncoderObserver::AdaptationSteps
-OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::Counts(
-    int reason) const {
-  VideoStreamEncoderObserver::AdaptationSteps counts;
-  counts.num_framerate_reductions = fps_counters_[reason];
-  counts.num_resolution_reductions = resolution_counters_[reason];
-  return counts;
-}
-
-void OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::
-    IncrementFramerate(int reason) {
-  ++(fps_counters_[reason]);
-}
-
-void OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::
-    IncrementResolution(int reason) {
-  ++(resolution_counters_[reason]);
-}
-
-void OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::
-    DecrementFramerate(int reason) {
-  if (fps_counters_[reason] == 0) {
-    // Balanced mode: Adapt up is in a different order, switch reason.
-    // E.g. framerate adapt down: quality (2), framerate adapt up: cpu (3).
-    // 1. Down resolution (cpu):   res={quality:0,cpu:1}, fps={quality:0,cpu:0}
-    // 2. Down fps (quality):      res={quality:0,cpu:1}, fps={quality:1,cpu:0}
-    // 3. Up fps (cpu):            res={quality:1,cpu:0}, fps={quality:0,cpu:0}
-    // 4. Up resolution (quality): res={quality:0,cpu:0}, fps={quality:0,cpu:0}
-    RTC_DCHECK_GT(TotalCount(reason), 0) << "No downgrade for reason.";
-    RTC_DCHECK_GT(FramerateCount(), 0) << "Framerate not downgraded.";
-    MoveCount(&resolution_counters_, reason);
-    MoveCount(&fps_counters_, (reason + 1) % kScaleReasonSize);
+class OveruseFrameDetectorResourceAdaptationModule::AdaptCounter final {
+ public:
+  AdaptCounter() {
+    fps_counters_.resize(AdaptationObserverInterface::kScaleReasonSize);
+    resolution_counters_.resize(AdaptationObserverInterface::kScaleReasonSize);
+    static_assert(AdaptationObserverInterface::kScaleReasonSize == 2,
+                  "Update MoveCount.");
   }
-  --(fps_counters_[reason]);
-  RTC_DCHECK_GE(fps_counters_[reason], 0);
-}
+  ~AdaptCounter() = default;
 
-void OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::
-    DecrementResolution(int reason) {
-  if (resolution_counters_[reason] == 0) {
-    // Balanced mode: Adapt up is in a different order, switch reason.
-    RTC_DCHECK_GT(TotalCount(reason), 0) << "No downgrade for reason.";
-    RTC_DCHECK_GT(ResolutionCount(), 0) << "Resolution not downgraded.";
-    MoveCount(&fps_counters_, reason);
-    MoveCount(&resolution_counters_, (reason + 1) % kScaleReasonSize);
+  // Get number of adaptation downscales for |reason|.
+  VideoStreamEncoderObserver::AdaptationSteps Counts(int reason) const {
+    VideoStreamEncoderObserver::AdaptationSteps counts;
+    counts.num_framerate_reductions = fps_counters_[reason];
+    counts.num_resolution_reductions = resolution_counters_[reason];
+    return counts;
   }
-  --(resolution_counters_[reason]);
-  RTC_DCHECK_GE(resolution_counters_[reason], 0);
-}
 
-void OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::
-    DecrementFramerate(int reason, int cur_fps) {
-  DecrementFramerate(reason);
-  // Reset if at max fps (i.e. in case of fewer steps up than down).
-  if (cur_fps == std::numeric_limits<int>::max())
-    absl::c_fill(fps_counters_, 0);
-}
-
-int OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::FramerateCount()
-    const {
-  return Count(fps_counters_);
-}
-
-int OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::
-    ResolutionCount() const {
-  return Count(resolution_counters_);
-}
-
-int OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::FramerateCount(
-    int reason) const {
-  return fps_counters_[reason];
-}
-
-int OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::ResolutionCount(
-    int reason) const {
-  return resolution_counters_[reason];
-}
-
-int OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::TotalCount(
-    int reason) const {
-  return FramerateCount(reason) + ResolutionCount(reason);
-}
-
-int OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::Count(
-    const std::vector<int>& counters) const {
-  return absl::c_accumulate(counters, 0);
-}
-
-void OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::MoveCount(
-    std::vector<int>* counters,
-    int from_reason) {
-  int to_reason = (from_reason + 1) % kScaleReasonSize;
-  ++((*counters)[to_reason]);
-  --((*counters)[from_reason]);
-}
-
-std::string
-OveruseFrameDetectorResourceAdaptationModule::AdaptCounter::ToString(
-    const std::vector<int>& counters) const {
-  rtc::StringBuilder ss;
-  for (size_t reason = 0; reason < kScaleReasonSize; ++reason) {
-    ss << (reason ? " cpu" : "quality") << ":" << counters[reason];
+  std::string ToString() const {
+    rtc::StringBuilder ss;
+    ss << "Downgrade counts: fps: {" << ToString(fps_counters_);
+    ss << "}, resolution: {" << ToString(resolution_counters_) << "}";
+    return ss.Release();
   }
-  return ss.Release();
-}
+
+  void IncrementFramerate(int reason) { ++(fps_counters_[reason]); }
+  void IncrementResolution(int reason) { ++(resolution_counters_[reason]); }
+  void DecrementFramerate(int reason) {
+    if (fps_counters_[reason] == 0) {
+      // Balanced mode: Adapt up is in a different order, switch reason.
+      // E.g. framerate adapt down: quality (2), framerate adapt up: cpu (3).
+      // 1. Down resolution (cpu):  res={quality:0,cpu:1}, fps={quality:0,cpu:0}
+      // 2. Down fps (quality):     res={quality:0,cpu:1}, fps={quality:1,cpu:0}
+      // 3. Up fps (cpu):           res={quality:1,cpu:0}, fps={quality:0,cpu:0}
+      // 4. Up resolution (quality):res={quality:0,cpu:0}, fps={quality:0,cpu:0}
+      RTC_DCHECK_GT(TotalCount(reason), 0) << "No downgrade for reason.";
+      RTC_DCHECK_GT(FramerateCount(), 0) << "Framerate not downgraded.";
+      MoveCount(&resolution_counters_, reason);
+      MoveCount(&fps_counters_,
+                (reason + 1) % AdaptationObserverInterface::kScaleReasonSize);
+    }
+    --(fps_counters_[reason]);
+    RTC_DCHECK_GE(fps_counters_[reason], 0);
+  }
+
+  void DecrementResolution(int reason) {
+    if (resolution_counters_[reason] == 0) {
+      // Balanced mode: Adapt up is in a different order, switch reason.
+      RTC_DCHECK_GT(TotalCount(reason), 0) << "No downgrade for reason.";
+      RTC_DCHECK_GT(ResolutionCount(), 0) << "Resolution not downgraded.";
+      MoveCount(&fps_counters_, reason);
+      MoveCount(&resolution_counters_,
+                (reason + 1) % AdaptationObserverInterface::kScaleReasonSize);
+    }
+    --(resolution_counters_[reason]);
+    RTC_DCHECK_GE(resolution_counters_[reason], 0);
+  }
+
+  void DecrementFramerate(int reason, int cur_fps) {
+    DecrementFramerate(reason);
+    // Reset if at max fps (i.e. in case of fewer steps up than down).
+    if (cur_fps == std::numeric_limits<int>::max())
+      absl::c_fill(fps_counters_, 0);
+  }
+
+  // Gets the total number of downgrades (for all adapt reasons).
+  int FramerateCount() const { return Count(fps_counters_); }
+  int ResolutionCount() const { return Count(resolution_counters_); }
+
+  // Gets the total number of downgrades for |reason|.
+  int FramerateCount(int reason) const { return fps_counters_[reason]; }
+  int ResolutionCount(int reason) const { return resolution_counters_[reason]; }
+  int TotalCount(int reason) const {
+    return FramerateCount(reason) + ResolutionCount(reason);
+  }
+
+ private:
+  std::string ToString(const std::vector<int>& counters) const {
+    rtc::StringBuilder ss;
+    for (size_t reason = 0;
+         reason < AdaptationObserverInterface::kScaleReasonSize; ++reason) {
+      ss << (reason ? " cpu" : "quality") << ":" << counters[reason];
+    }
+    return ss.Release();
+  }
+
+  int Count(const std::vector<int>& counters) const {
+    return absl::c_accumulate(counters, 0);
+  }
+
+  void MoveCount(std::vector<int>* counters, int from_reason) {
+    int to_reason =
+        (from_reason + 1) % AdaptationObserverInterface::kScaleReasonSize;
+    ++((*counters)[to_reason]);
+    --((*counters)[from_reason]);
+  }
+
+  // Degradation counters holding number of framerate/resolution reductions
+  // per adapt reason.
+  std::vector<int> fps_counters_;
+  std::vector<int> resolution_counters_;
+};
+
+class OveruseFrameDetectorResourceAdaptationModule::InitialFrameDropper {
+ public:
+  explicit InitialFrameDropper(QualityScalerResource* quality_scaler_resource)
+      : quality_scaler_resource_(quality_scaler_resource),
+        quality_scaler_settings_(QualityScalerSettings::ParseFromFieldTrials()),
+        has_seen_first_bwe_drop_(false),
+        set_start_bitrate_(DataRate::Zero()),
+        set_start_bitrate_time_ms_(0),
+        initial_framedrop_(0) {
+    RTC_DCHECK(quality_scaler_resource_);
+  }
+
+  // Output signal.
+  bool DropInitialFrames() const {
+    return initial_framedrop_ < kMaxInitialFramedrop;
+  }
+
+  // Input signals.
+  void SetStartBitrate(DataRate start_bitrate, int64_t now_ms) {
+    set_start_bitrate_ = start_bitrate;
+    set_start_bitrate_time_ms_ = now_ms;
+  }
+
+  void SetTargetBitrate(DataRate target_bitrate, int64_t now_ms) {
+    if (set_start_bitrate_ > DataRate::Zero() && !has_seen_first_bwe_drop_ &&
+        quality_scaler_resource_->is_started() &&
+        quality_scaler_settings_.InitialBitrateIntervalMs() &&
+        quality_scaler_settings_.InitialBitrateFactor()) {
+      int64_t diff_ms = now_ms - set_start_bitrate_time_ms_;
+      if (diff_ms <
+              quality_scaler_settings_.InitialBitrateIntervalMs().value() &&
+          (target_bitrate <
+           (set_start_bitrate_ *
+            quality_scaler_settings_.InitialBitrateFactor().value()))) {
+        RTC_LOG(LS_INFO) << "Reset initial_framedrop_. Start bitrate: "
+                         << set_start_bitrate_.bps()
+                         << ", target bitrate: " << target_bitrate.bps();
+        initial_framedrop_ = 0;
+        has_seen_first_bwe_drop_ = true;
+      }
+    }
+  }
+
+  void OnFrameDroppedDueToSize() { ++initial_framedrop_; }
+
+  void OnMaybeEncodeFrame() { initial_framedrop_ = kMaxInitialFramedrop; }
+
+  void OnQualityScalerSettingsUpdated() {
+    if (quality_scaler_resource_->is_started()) {
+      // Restart frame drops due to size.
+      initial_framedrop_ = 0;
+    } else {
+      // Quality scaling disabled so we shouldn't drop initial frames.
+      initial_framedrop_ = kMaxInitialFramedrop;
+    }
+  }
+
+ private:
+  // The maximum number of frames to drop at beginning of stream to try and
+  // achieve desired bitrate.
+  static const int kMaxInitialFramedrop = 4;
+
+  const QualityScalerResource* quality_scaler_resource_;
+  const QualityScalerSettings quality_scaler_settings_;
+  bool has_seen_first_bwe_drop_;
+  DataRate set_start_bitrate_;
+  int64_t set_start_bitrate_time_ms_;
+  // Counts how many frames we've dropped in the initial framedrop phase.
+  int initial_framedrop_;
+};
 
 OveruseFrameDetectorResourceAdaptationModule::
     OveruseFrameDetectorResourceAdaptationModule(
+        Clock* clock,
         bool experiment_cpu_load_estimator,
         std::unique_ptr<OveruseFrameDetector> overuse_detector,
         VideoStreamEncoderObserver* encoder_stats_observer,
         ResourceAdaptationModuleListener* adaptation_listener)
     : adaptation_listener_(adaptation_listener),
+      clock_(clock),
       experiment_cpu_load_estimator_(experiment_cpu_load_estimator),
       has_input_video_(false),
       degradation_preference_(DegradationPreference::DISABLED),
@@ -354,17 +409,23 @@ OveruseFrameDetectorResourceAdaptationModule::
       balanced_settings_(),
       last_adaptation_request_(absl::nullopt),
       source_restrictor_(std::make_unique<VideoSourceRestrictor>()),
-      overuse_detector_(std::move(overuse_detector)),
-      overuse_detector_is_started_(false),
+      encode_usage_resource_(
+          std::make_unique<EncodeUsageResource>(std::move(overuse_detector))),
+      quality_scaler_resource_(std::make_unique<QualityScalerResource>()),
+      initial_frame_dropper_(std::make_unique<InitialFrameDropper>(
+          quality_scaler_resource_.get())),
+      quality_scaling_experiment_enabled_(QualityScalingExperiment::Enabled()),
       last_input_frame_size_(absl::nullopt),
       target_frame_rate_(absl::nullopt),
-      target_bitrate_bps_(absl::nullopt),
-      quality_scaler_(nullptr),
+      encoder_target_bitrate_bps_(absl::nullopt),
+      quality_rampup_done_(false),
+      quality_rampup_experiment_(QualityRampupExperiment::ParseSettings()),
       encoder_settings_(absl::nullopt),
       encoder_stats_observer_(encoder_stats_observer) {
   RTC_DCHECK(adaptation_listener_);
-  RTC_DCHECK(overuse_detector_);
   RTC_DCHECK(encoder_stats_observer_);
+  encode_usage_resource_->RegisterListener(this);
+  quality_scaler_resource_->RegisterListener(this);
 }
 
 OveruseFrameDetectorResourceAdaptationModule::
@@ -373,31 +434,21 @@ OveruseFrameDetectorResourceAdaptationModule::
 void OveruseFrameDetectorResourceAdaptationModule::StartResourceAdaptation(
     ResourceAdaptationModuleListener* adaptation_listener) {
   RTC_DCHECK(encoder_settings_.has_value());
-  RTC_DCHECK(!overuse_detector_is_started_);
-  // TODO(hbos): When AdaptUp() and AdaptDown() are no longer invoked outside
-  // the interval between StartCheckForOveruse() and StopCheckForOveruse(),
-  // support configuring which |adaptation_listener_| to use on the fly. It is
-  // currently hardcoded for the entire lifetime of the module in order to
-  // support adaptation caused by VideoStreamEncoder or QualityScaler invoking
-  // AdaptUp() and AdaptDown() even when the OveruseDetector is inactive.
+  // TODO(https://crbug.com/webrtc/11222): Rethink when the adaptation listener
+  // should be passed in and why. If resources are separated from modules then
+  // those resources may be started or stopped separately from the module.
   RTC_DCHECK_EQ(adaptation_listener, adaptation_listener_);
-  overuse_detector_->StartCheckForOveruse(TaskQueueBase::Current(),
-                                          GetCpuOveruseOptions(), this);
-  overuse_detector_is_started_ = true;
-  overuse_detector_->OnTargetFramerateUpdated(
-      target_frame_rate_.has_value()
-          ? static_cast<int>(target_frame_rate_.value())
-          : std::numeric_limits<int>::max());
+  encode_usage_resource_->StartCheckForOveruse(GetCpuOveruseOptions());
 }
 
 void OveruseFrameDetectorResourceAdaptationModule::StopResourceAdaptation() {
-  overuse_detector_->StopCheckForOveruse();
-  overuse_detector_is_started_ = false;
+  encode_usage_resource_->StopCheckForOveruse();
+  quality_scaler_resource_->StopCheckForOveruse();
 }
 
 void OveruseFrameDetectorResourceAdaptationModule::SetHasInputVideo(
     bool has_input_video) {
-  // While false, AdaptUp() and AdaptDown() are NO-OPS.
+  // While false, OnResourceUnderuse() and OnResourceOveruse() are NO-OPS.
   has_input_video_ = has_input_video;
 }
 
@@ -422,12 +473,32 @@ void OveruseFrameDetectorResourceAdaptationModule::SetDegradationPreference(
 void OveruseFrameDetectorResourceAdaptationModule::SetEncoderSettings(
     EncoderSettings encoder_settings) {
   encoder_settings_ = std::move(encoder_settings);
+
+  quality_rampup_experiment_.SetMaxBitrate(
+      LastInputFrameSizeOrDefault(),
+      encoder_settings_->video_codec().maxBitrate);
   MaybeUpdateTargetFrameRate();
 }
 
-void OveruseFrameDetectorResourceAdaptationModule::SetEncoderTargetBitrate(
-    absl::optional<uint32_t> target_bitrate_bps) {
-  target_bitrate_bps_ = target_bitrate_bps;
+void OveruseFrameDetectorResourceAdaptationModule::SetStartBitrate(
+    DataRate start_bitrate) {
+  if (!start_bitrate.IsZero())
+    encoder_target_bitrate_bps_ = start_bitrate.bps();
+  initial_frame_dropper_->SetStartBitrate(start_bitrate,
+                                          clock_->TimeInMicroseconds());
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::SetTargetBitrate(
+    DataRate target_bitrate) {
+  if (!target_bitrate.IsZero())
+    encoder_target_bitrate_bps_ = target_bitrate.bps();
+  initial_frame_dropper_->SetTargetBitrate(target_bitrate,
+                                           clock_->TimeInMilliseconds());
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::SetEncoderRates(
+    const VideoEncoder::RateControlParameters& encoder_rates) {
+  encoder_rates_ = encoder_rates;
 }
 
 void OveruseFrameDetectorResourceAdaptationModule::
@@ -448,49 +519,152 @@ void OveruseFrameDetectorResourceAdaptationModule::OnFrameDroppedDueToSize() {
       AdaptationObserverInterface::AdaptReason::kQuality);
   int res_count = GetConstAdaptCounter().ResolutionCount(
       AdaptationObserverInterface::AdaptReason::kQuality);
-  AdaptDown(AdaptationObserverInterface::AdaptReason::kQuality);
+  OnResourceOveruse(AdaptationObserverInterface::AdaptReason::kQuality);
   if (degradation_preference() == DegradationPreference::BALANCED &&
       GetConstAdaptCounter().FramerateCount(
           AdaptationObserverInterface::AdaptReason::kQuality) > fps_count) {
     // Adapt framerate in same step as resolution.
-    AdaptDown(AdaptationObserverInterface::AdaptReason::kQuality);
+    OnResourceOveruse(AdaptationObserverInterface::AdaptReason::kQuality);
   }
   if (GetConstAdaptCounter().ResolutionCount(
           AdaptationObserverInterface::AdaptReason::kQuality) > res_count) {
     encoder_stats_observer_->OnInitialQualityResolutionAdaptDown();
   }
+  initial_frame_dropper_->OnFrameDroppedDueToSize();
 }
 
 void OveruseFrameDetectorResourceAdaptationModule::OnEncodeStarted(
     const VideoFrame& cropped_frame,
     int64_t time_when_first_seen_us) {
-  // TODO(hbos): Rename FrameCaptured() to something more appropriate (e.g.
-  // "OnEncodeStarted"?) or revise usage.
-  overuse_detector_->FrameCaptured(cropped_frame, time_when_first_seen_us);
+  encode_usage_resource_->OnEncodeStarted(cropped_frame,
+                                          time_when_first_seen_us);
 }
 
 void OveruseFrameDetectorResourceAdaptationModule::OnEncodeCompleted(
-    uint32_t timestamp,
+    const EncodedImage& encoded_image,
     int64_t time_sent_in_us,
-    int64_t capture_time_us,
     absl::optional<int> encode_duration_us) {
-  // TODO(hbos): Rename FrameSent() to something more appropriate (e.g.
-  // "OnEncodeCompleted"?).
-  overuse_detector_->FrameSent(timestamp, time_sent_in_us, capture_time_us,
-                               encode_duration_us);
+  // Inform |encode_usage_resource_| of the encode completed event.
+  uint32_t timestamp = encoded_image.Timestamp();
+  int64_t capture_time_us =
+      encoded_image.capture_time_ms_ * rtc::kNumMicrosecsPerMillisec;
+  encode_usage_resource_->OnEncodeCompleted(
+      timestamp, time_sent_in_us, capture_time_us, encode_duration_us);
+  // Inform |quality_scaler_resource_| of the encode completed event.
+  quality_scaler_resource_->OnEncodeCompleted(encoded_image, time_sent_in_us);
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::OnFrameDropped(
+    EncodedImageCallback::DropReason reason) {
+  quality_scaler_resource_->OnFrameDropped(reason);
+}
+
+bool OveruseFrameDetectorResourceAdaptationModule::DropInitialFrames() const {
+  return initial_frame_dropper_->DropInitialFrames();
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::OnMaybeEncodeFrame() {
+  initial_frame_dropper_->OnMaybeEncodeFrame();
+  MaybePerformQualityRampupExperiment();
 }
 
 void OveruseFrameDetectorResourceAdaptationModule::UpdateQualityScalerSettings(
     absl::optional<VideoEncoder::QpThresholds> qp_thresholds) {
   if (qp_thresholds.has_value()) {
-    quality_scaler_ =
-        std::make_unique<QualityScaler>(this, qp_thresholds.value());
+    quality_scaler_resource_->StopCheckForOveruse();
+    quality_scaler_resource_->StartCheckForOveruse(qp_thresholds.value());
   } else {
-    quality_scaler_ = nullptr;
+    quality_scaler_resource_->StopCheckForOveruse();
+  }
+  initial_frame_dropper_->OnQualityScalerSettingsUpdated();
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::ConfigureQualityScaler(
+    const VideoEncoder::EncoderInfo& encoder_info) {
+  const auto scaling_settings = encoder_info.scaling_settings;
+  const bool quality_scaling_allowed =
+      IsResolutionScalingEnabled(degradation_preference_) &&
+      scaling_settings.thresholds;
+
+  // TODO(https://crbug.com/webrtc/11222): Should this move to
+  // QualityScalerResource?
+  if (quality_scaling_allowed) {
+    if (!quality_scaler_resource_->is_started()) {
+      // Quality scaler has not already been configured.
+
+      // Use experimental thresholds if available.
+      absl::optional<VideoEncoder::QpThresholds> experimental_thresholds;
+      if (quality_scaling_experiment_enabled_) {
+        experimental_thresholds = QualityScalingExperiment::GetQpThresholds(
+            GetVideoCodecTypeOrGeneric());
+      }
+      UpdateQualityScalerSettings(experimental_thresholds
+                                      ? *experimental_thresholds
+                                      : *(scaling_settings.thresholds));
+    }
+  } else {
+    UpdateQualityScalerSettings(absl::nullopt);
+  }
+
+  // Set the qp-thresholds to the balanced settings if balanced mode.
+  if (degradation_preference_ == DegradationPreference::BALANCED &&
+      quality_scaler_resource_->is_started()) {
+    absl::optional<VideoEncoder::QpThresholds> thresholds =
+        balanced_settings_.GetQpThresholds(GetVideoCodecTypeOrGeneric(),
+                                           LastInputFrameSizeOrDefault());
+    if (thresholds) {
+      quality_scaler_resource_->SetQpThresholds(*thresholds);
+    }
+  }
+
+  encoder_stats_observer_->OnAdaptationChanged(
+      VideoStreamEncoderObserver::AdaptationReason::kNone,
+      GetActiveCounts(AdaptationObserverInterface::AdaptReason::kCpu),
+      GetActiveCounts(AdaptationObserverInterface::AdaptReason::kQuality));
+}
+
+ResourceListenerResponse
+OveruseFrameDetectorResourceAdaptationModule::OnResourceUsageStateMeasured(
+    const Resource& resource) {
+  // If we didn't have this dependency on AdaptReason the module could be
+  // listening to other types of Resources.
+  RTC_DCHECK(&resource == encode_usage_resource_.get() ||
+             &resource == quality_scaler_resource_.get());
+  AdaptationObserverInterface::AdaptReason reason =
+      &resource == encode_usage_resource_.get()
+          ? AdaptationObserverInterface::AdaptReason::kCpu
+          : AdaptationObserverInterface::AdaptReason::kQuality;
+  switch (resource.usage_state()) {
+    case ResourceUsageState::kOveruse:
+      return OnResourceOveruse(reason);
+    case ResourceUsageState::kStable:
+      // Do nothing.
+      //
+      // This module has two resources: |encoude_usage_resource_| and
+      // |quality_scaler_resource_|. A smarter adaptation module might not
+      // attempt to adapt up unless ALL resources were underused, but this
+      // module acts on each resource's measurement in isolation - without
+      // taking the current usage of any other resource into account.
+      return ResourceListenerResponse::kNothing;
+    case ResourceUsageState::kUnderuse:
+      OnResourceUnderuse(reason);
+      return ResourceListenerResponse::kNothing;
   }
 }
 
-void OveruseFrameDetectorResourceAdaptationModule::AdaptUp(AdaptReason reason) {
+void OveruseFrameDetectorResourceAdaptationModule::OnResourceUnderuseForTesting(
+    AdaptationObserverInterface::AdaptReason reason) {
+  OnResourceUnderuse(reason);
+}
+
+bool OveruseFrameDetectorResourceAdaptationModule::OnResourceOveruseForTesting(
+    AdaptationObserverInterface::AdaptReason reason) {
+  return OnResourceOveruse(reason) !=
+         ResourceListenerResponse::kQualityScalerShouldIncreaseFrequency;
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::OnResourceUnderuse(
+    AdaptationObserverInterface::AdaptReason reason) {
   if (!has_input_video_)
     return;
   const AdaptCounter& adapt_counter = GetConstAdaptCounter();
@@ -522,10 +696,10 @@ void OveruseFrameDetectorResourceAdaptationModule::AdaptUp(AdaptReason reason) {
   switch (EffectiveDegradataionPreference()) {
     case DegradationPreference::BALANCED: {
       // Check if quality should be increased based on bitrate.
-      if (reason == kQuality &&
-          !balanced_settings_.CanAdaptUp(GetVideoCodecTypeOrGeneric(),
-                                         LastInputFrameSizeOrDefault(),
-                                         target_bitrate_bps_.value_or(0))) {
+      if (reason == AdaptationObserverInterface::AdaptReason::kQuality &&
+          !balanced_settings_.CanAdaptUp(
+              GetVideoCodecTypeOrGeneric(), LastInputFrameSizeOrDefault(),
+              encoder_target_bitrate_bps_.value_or(0))) {
         return;
       }
       // Try scale up framerate, if higher.
@@ -543,10 +717,10 @@ void OveruseFrameDetectorResourceAdaptationModule::AdaptUp(AdaptReason reason) {
         break;
       }
       // Check if resolution should be increased based on bitrate.
-      if (reason == kQuality &&
+      if (reason == AdaptationObserverInterface::AdaptReason::kQuality &&
           !balanced_settings_.CanAdaptUpResolution(
               GetVideoCodecTypeOrGeneric(), LastInputFrameSizeOrDefault(),
-              target_bitrate_bps_.value_or(0))) {
+              encoder_target_bitrate_bps_.value_or(0))) {
         return;
       }
       // Scale up resolution.
@@ -555,9 +729,9 @@ void OveruseFrameDetectorResourceAdaptationModule::AdaptUp(AdaptReason reason) {
     case DegradationPreference::MAINTAIN_FRAMERATE: {
       // Check if resolution should be increased based on bitrate and
       // limits specified by encoder capabilities.
-      if (reason == kQuality &&
+      if (reason == AdaptationObserverInterface::AdaptReason::kQuality &&
           !CanAdaptUpResolution(LastInputFrameSizeOrDefault(),
-                                target_bitrate_bps_.value_or(0))) {
+                                encoder_target_bitrate_bps_.value_or(0))) {
         return;
       }
 
@@ -603,10 +777,11 @@ void OveruseFrameDetectorResourceAdaptationModule::AdaptUp(AdaptReason reason) {
   RTC_LOG(LS_INFO) << adapt_counter.ToString();
 }
 
-bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
-    AdaptReason reason) {
+ResourceListenerResponse
+OveruseFrameDetectorResourceAdaptationModule::OnResourceOveruse(
+    AdaptationObserverInterface::AdaptReason reason) {
   if (!has_input_video_)
-    return false;
+    return ResourceListenerResponse::kQualityScalerShouldIncreaseFrequency;
   AdaptationRequest adaptation_request = {
       LastInputFrameSizeOrDefault(),
       encoder_stats_observer_->GetInputFrameRate(),
@@ -615,8 +790,6 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
   bool downgrade_requested =
       last_adaptation_request_ &&
       last_adaptation_request_->mode_ == AdaptationRequest::Mode::kAdaptDown;
-
-  bool did_adapt = true;
 
   switch (EffectiveDegradataionPreference()) {
     case DegradationPreference::BALANCED:
@@ -627,7 +800,7 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
               last_adaptation_request_->input_pixel_count_) {
         // Don't request lower resolution if the current resolution is not
         // lower than the last time we asked for the resolution to be lowered.
-        return true;
+        return ResourceListenerResponse::kNothing;
       }
       break;
     case DegradationPreference::MAINTAIN_RESOLUTION:
@@ -640,12 +813,14 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
         // we have to estimate, and can fluctuate naturally over time, don't
         // make the same kind of limitations as for resolution, but trust the
         // overuse detector to not trigger too often.
-        return true;
+        return ResourceListenerResponse::kNothing;
       }
       break;
     case DegradationPreference::DISABLED:
-      return true;
+      return ResourceListenerResponse::kNothing;
   }
+
+  ResourceListenerResponse response = ResourceListenerResponse::kNothing;
 
   switch (EffectiveDegradataionPreference()) {
     case DegradationPreference::BALANCED: {
@@ -660,7 +835,8 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
         if (min_diff && adaptation_request.framerate_fps_ > 0) {
           int fps_diff = adaptation_request.framerate_fps_ - fps;
           if (fps_diff < min_diff.value()) {
-            did_adapt = false;
+            response =
+                ResourceListenerResponse::kQualityScalerShouldIncreaseFrequency;
           }
         }
         break;
@@ -680,7 +856,7 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
               &min_pixels_reached)) {
         if (min_pixels_reached)
           encoder_stats_observer_->OnMinPixelLimitReached();
-        return true;
+        return ResourceListenerResponse::kNothing;
       }
       GetAdaptCounter().IncrementResolution(reason);
       break;
@@ -691,7 +867,7 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
           source_restrictor_->RequestFramerateLowerThan(
               adaptation_request.framerate_fps_);
       if (requested_framerate == -1)
-        return true;
+        return ResourceListenerResponse::kNothing;
       GetAdaptCounter().IncrementFramerate(reason);
       break;
     }
@@ -708,7 +884,7 @@ bool OveruseFrameDetectorResourceAdaptationModule::AdaptDown(
   UpdateAdaptationStats(reason);
 
   RTC_LOG(LS_INFO) << GetConstAdaptCounter().ToString();
-  return did_adapt;
+  return response;
 }
 
 // TODO(pbos): Lower these thresholds (to closer to 100%) when we handle
@@ -748,8 +924,8 @@ int OveruseFrameDetectorResourceAdaptationModule::LastInputFrameSizeOrDefault()
   // yet.
   // TODO(hbos): Can we simply DCHECK has_value() before usage instead? Having a
   // DCHECK passed all the tests but adding it does change the requirements of
-  // this class (= not being allowed to call AdaptUp() or AdaptDown() before
-  // OnFrame()) and deserves a standalone CL.
+  // this class (= not being allowed to call OnResourceUnderuse() or
+  // OnResourceOveruse() before OnFrame()) and deserves a standalone CL.
   return last_input_frame_size_.value_or(
       VideoStreamEncoder::kDefaultLastFrameInfoWidth *
       VideoStreamEncoder::kDefaultLastFrameInfoHeight);
@@ -787,53 +963,47 @@ void OveruseFrameDetectorResourceAdaptationModule::
        codec_max_frame_rate.value() < target_frame_rate.value())) {
     target_frame_rate = codec_max_frame_rate;
   }
-  if (target_frame_rate != target_frame_rate_) {
-    target_frame_rate_ = target_frame_rate;
-    if (overuse_detector_is_started_) {
-      overuse_detector_->OnTargetFramerateUpdated(
-          target_frame_rate_.has_value()
-              ? static_cast<int>(target_frame_rate_.value())
-              : std::numeric_limits<int>::max());
-    }
-  }
+  encode_usage_resource_->SetTargetFrameRate(target_frame_rate);
 }
 
 // TODO(nisse): Delete, once AdaptReason and AdaptationReason are merged.
 void OveruseFrameDetectorResourceAdaptationModule::UpdateAdaptationStats(
-    AdaptReason reason) {
+    AdaptationObserverInterface::AdaptReason reason) {
   switch (reason) {
-    case kCpu:
+    case AdaptationObserverInterface::AdaptReason::kCpu:
       encoder_stats_observer_->OnAdaptationChanged(
           VideoStreamEncoderObserver::AdaptationReason::kCpu,
-          GetActiveCounts(kCpu), GetActiveCounts(kQuality));
+          GetActiveCounts(AdaptationObserverInterface::AdaptReason::kCpu),
+          GetActiveCounts(AdaptationObserverInterface::AdaptReason::kQuality));
       break;
-    case kQuality:
+    case AdaptationObserverInterface::AdaptReason::kQuality:
       encoder_stats_observer_->OnAdaptationChanged(
           VideoStreamEncoderObserver::AdaptationReason::kQuality,
-          GetActiveCounts(kCpu), GetActiveCounts(kQuality));
+          GetActiveCounts(AdaptationObserverInterface::AdaptReason::kCpu),
+          GetActiveCounts(AdaptationObserverInterface::AdaptReason::kQuality));
       break;
   }
 }
 
 VideoStreamEncoderObserver::AdaptationSteps
 OveruseFrameDetectorResourceAdaptationModule::GetActiveCounts(
-    AdaptReason reason) {
+    AdaptationObserverInterface::AdaptReason reason) {
   VideoStreamEncoderObserver::AdaptationSteps counts =
       GetConstAdaptCounter().Counts(reason);
   switch (reason) {
-    case kCpu:
+    case AdaptationObserverInterface::AdaptReason::kCpu:
       if (!IsFramerateScalingEnabled(degradation_preference_))
         counts.num_framerate_reductions = absl::nullopt;
       if (!IsResolutionScalingEnabled(degradation_preference_))
         counts.num_resolution_reductions = absl::nullopt;
       break;
-    case kQuality:
+    case AdaptationObserverInterface::AdaptReason::kQuality:
       if (!IsFramerateScalingEnabled(degradation_preference_) ||
-          !quality_scaler_) {
+          !quality_scaler_resource_->is_started()) {
         counts.num_framerate_reductions = absl::nullopt;
       }
       if (!IsResolutionScalingEnabled(degradation_preference_) ||
-          !quality_scaler_) {
+          !quality_scaler_resource_->is_started()) {
         counts.num_resolution_reductions = absl::nullopt;
       }
       break;
@@ -865,12 +1035,6 @@ OveruseFrameDetectorResourceAdaptationModule::GetConstAdaptCounter() {
   return adapt_counters_[degradation_preference_];
 }
 
-absl::optional<VideoEncoder::QpThresholds>
-OveruseFrameDetectorResourceAdaptationModule::GetQpThresholds() const {
-  return balanced_settings_.GetQpThresholds(GetVideoCodecTypeOrGeneric(),
-                                            LastInputFrameSizeOrDefault());
-}
-
 bool OveruseFrameDetectorResourceAdaptationModule::CanAdaptUpResolution(
     int pixels,
     uint32_t bitrate_bps) const {
@@ -886,6 +1050,40 @@ bool OveruseFrameDetectorResourceAdaptationModule::CanAdaptUpResolution(
   RTC_DCHECK_GE(bitrate_limits->frame_size_pixels, pixels);
   return bitrate_bps >=
          static_cast<uint32_t>(bitrate_limits->min_start_bitrate_bps);
+}
+
+void OveruseFrameDetectorResourceAdaptationModule::
+    MaybePerformQualityRampupExperiment() {
+  if (!quality_scaler_resource_->is_started())
+    return;
+
+  if (quality_rampup_done_)
+    return;
+
+  int64_t now_ms = clock_->TimeInMilliseconds();
+  uint32_t bw_kbps = encoder_rates_.has_value()
+                         ? encoder_rates_.value().bandwidth_allocation.kbps()
+                         : 0;
+
+  bool try_quality_rampup = false;
+  if (quality_rampup_experiment_.BwHigh(now_ms, bw_kbps)) {
+    // Verify that encoder is at max bitrate and the QP is low.
+    if (encoder_settings_ &&
+        encoder_target_bitrate_bps_.value_or(0) ==
+            encoder_settings_->video_codec().maxBitrate * 1000 &&
+        quality_scaler_resource_->QpFastFilterLow()) {
+      try_quality_rampup = true;
+    }
+  }
+  if (try_quality_rampup &&
+      GetConstAdaptCounter().ResolutionCount(
+          AdaptationObserverInterface::AdaptReason::kQuality) > 0 &&
+      GetConstAdaptCounter().TotalCount(
+          AdaptationObserverInterface::AdaptReason::kCpu) == 0) {
+    RTC_LOG(LS_INFO) << "Reset quality limitations.";
+    ResetVideoSourceRestrictions();
+    quality_rampup_done_ = true;
+  }
 }
 
 }  // namespace webrtc

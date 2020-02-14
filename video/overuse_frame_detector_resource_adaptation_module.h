@@ -25,9 +25,15 @@
 #include "api/video_codecs/video_codec.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/video_encoder_config.h"
+#include "call/adaptation/resource.h"
 #include "call/adaptation/resource_adaptation_module_interface.h"
 #include "rtc_base/experiments/balanced_degradation_settings.h"
+#include "rtc_base/experiments/quality_rampup_experiment.h"
+#include "rtc_base/experiments/quality_scaler_settings.h"
+#include "system_wrappers/include/clock.h"
+#include "video/encode_usage_resource.h"
 #include "video/overuse_frame_detector.h"
+#include "video/quality_scaler_resource.h"
 
 namespace webrtc {
 
@@ -49,11 +55,12 @@ class VideoStreamEncoder;
 // implemented and used.
 class OveruseFrameDetectorResourceAdaptationModule
     : public ResourceAdaptationModuleInterface,
-      public AdaptationObserverInterface {
+      public ResourceListener {
  public:
   // The module can be constructed on any sequence, but must be initialized and
   // used on a single sequence, e.g. the encoder queue.
   OveruseFrameDetectorResourceAdaptationModule(
+      Clock* clock,
       bool experiment_cpu_load_estimator,
       std::unique_ptr<OveruseFrameDetector> overuse_detector,
       VideoStreamEncoderObserver* encoder_stats_observer,
@@ -63,7 +70,6 @@ class OveruseFrameDetectorResourceAdaptationModule
   DegradationPreference degradation_preference() const {
     return degradation_preference_;
   }
-  QualityScaler* quality_scaler() const { return quality_scaler_.get(); }
 
   // ResourceAdaptationModuleInterface implementation.
   void StartResourceAdaptation(
@@ -73,89 +79,55 @@ class OveruseFrameDetectorResourceAdaptationModule
   void SetDegradationPreference(
       DegradationPreference degradation_preference) override;
   void SetEncoderSettings(EncoderSettings encoder_settings) override;
-  void SetEncoderTargetBitrate(
-      absl::optional<uint32_t> target_bitrate_bps) override;
-  void ResetVideoSourceRestrictions() override;
+  void SetStartBitrate(DataRate start_bitrate) override;
+  void SetTargetBitrate(DataRate target_bitrate) override;
+  void SetEncoderRates(
+      const VideoEncoder::RateControlParameters& encoder_rates) override;
 
   void OnFrame(const VideoFrame& frame) override;
   void OnFrameDroppedDueToSize() override;
+  void OnMaybeEncodeFrame() override;
   void OnEncodeStarted(const VideoFrame& cropped_frame,
                        int64_t time_when_first_seen_us) override;
-  void OnEncodeCompleted(uint32_t timestamp,
+  void OnEncodeCompleted(const EncodedImage& encoded_image,
                          int64_t time_sent_in_us,
-                         int64_t capture_time_us,
                          absl::optional<int> encode_duration_us) override;
+  void OnFrameDropped(EncodedImageCallback::DropReason reason) override;
 
-  // Use nullopt to disable quality scaling.
-  void UpdateQualityScalerSettings(
-      absl::optional<VideoEncoder::QpThresholds> qp_thresholds);
+  // TODO(hbos): Is dropping initial frames really just a special case of "don't
+  // encode frames right now"? Can this be part of VideoSourceRestrictions,
+  // which handles the output of the rest of the encoder settings? This is
+  // something we'll need to support for "disable video due to overuse", not
+  // initial frames.
+  bool DropInitialFrames() const;
 
-  class AdaptCounter final {
-   public:
-    AdaptCounter();
-    ~AdaptCounter();
+  // TODO(eshr): This can be made private if we configure on
+  // SetDegredationPreference and SetEncoderSettings.
+  // (https://crbug.com/webrtc/11338)
+  void ConfigureQualityScaler(const VideoEncoder::EncoderInfo& encoder_info);
 
-    // Get number of adaptation downscales for |reason|.
-    VideoStreamEncoderObserver::AdaptationSteps Counts(int reason) const;
+  // ResourceUsageListener implementation.
+  ResourceListenerResponse OnResourceUsageStateMeasured(
+      const Resource& resource) override;
 
-    std::string ToString() const;
-
-    void IncrementFramerate(int reason);
-    void IncrementResolution(int reason);
-    void DecrementFramerate(int reason);
-    void DecrementResolution(int reason);
-    void DecrementFramerate(int reason, int cur_fps);
-
-    // Gets the total number of downgrades (for all adapt reasons).
-    int FramerateCount() const;
-    int ResolutionCount() const;
-
-    // Gets the total number of downgrades for |reason|.
-    int FramerateCount(int reason) const;
-    int ResolutionCount(int reason) const;
-    int TotalCount(int reason) const;
-
-   private:
-    std::string ToString(const std::vector<int>& counters) const;
-    int Count(const std::vector<int>& counters) const;
-    void MoveCount(std::vector<int>* counters, int from_reason);
-
-    // Degradation counters holding number of framerate/resolution reductions
-    // per adapt reason.
-    std::vector<int> fps_counters_;
-    std::vector<int> resolution_counters_;
-  };
-
-  // AdaptationObserverInterface implementation. Used both "internally" as
-  // feedback from |overuse_detector_|, and externally from VideoStreamEncoder:
-  // - It is wired to the VideoStreamEncoder::quality_scaler_.
-  // - It is invoked by VideoStreamEncoder::MaybeEncodeVideoFrame().
-  // TODO(hbos): Decouple quality scaling and resource adaptation, or find an
-  // interface for reconfiguring externally.
-  // TODO(hbos): VideoStreamEncoder should not be responsible for any part of
-  // the adaptation.
-  void AdaptUp(AdaptReason reason) override;
-  bool AdaptDown(AdaptReason reason) override;
-
-  // Used by VideoStreamEncoder when ConfigureQualityScaler() occurs and the
-  // |encoder_stats_observer_| is called outside of this class.
-  // TODO(hbos): Decouple quality scaling and resource adaptation logic and make
-  // this method private.
-  VideoStreamEncoderObserver::AdaptationSteps GetActiveCounts(
-      AdaptReason reason);
-
-  // Used by VideoStreamEncoder::MaybeEncodeVideoFrame().
-  // TODO(hbos): VideoStreamEncoder should not be responsible for any part of
-  // the adaptation. Move this logic to this module?
-  const AdaptCounter& GetConstAdaptCounter();
-
-  // Used by VideoStreamEncoder::ConfigureQualityScaler().
-  // TODO(hbos): Decouple quality scaling and resource adaptation logic and
-  // delete this method.
-  absl::optional<VideoEncoder::QpThresholds> GetQpThresholds() const;
+  // Public versions of OnResourceUnderuse/OnResourceOveruse only used for
+  // testing.
+  // TODO(https://crbug.com/webrtc/11222): Control overuse/underuse from testing
+  // by injecting fake resources and remove these methods.
+  void OnResourceUnderuseForTesting(
+      AdaptationObserverInterface::AdaptReason reason);
+  // Returns false if OnResourceOveruse() returns
+  // ResourceListenerResponse::kQualityScalerShouldIncreaseFrequency.
+  // TODO(https://crbug.com/webrtc/11222): Get rid of the
+  // ResourceListenerResponse enum and the boolean return value of
+  // AdaptationObserverInterface::AdaptDown() that this method mimics.
+  bool OnResourceOveruseForTesting(
+      AdaptationObserverInterface::AdaptReason reason);
 
  private:
   class VideoSourceRestrictor;
+  class AdaptCounter;
+  class InitialFrameDropper;
 
   struct AdaptationRequest {
     // The pixel count produced by the source at the time of the adaptation.
@@ -166,25 +138,44 @@ class OveruseFrameDetectorResourceAdaptationModule
     enum class Mode { kAdaptUp, kAdaptDown } mode_;
   };
 
+  void OnResourceUnderuse(AdaptationObserverInterface::AdaptReason reason);
+  ResourceListenerResponse OnResourceOveruse(
+      AdaptationObserverInterface::AdaptReason reason);
+
   CpuOveruseOptions GetCpuOveruseOptions() const;
   VideoCodecType GetVideoCodecTypeOrGeneric() const;
   int LastInputFrameSizeOrDefault() const;
+  VideoStreamEncoderObserver::AdaptationSteps GetActiveCounts(
+      AdaptationObserverInterface::AdaptReason reason);
+  const AdaptCounter& GetConstAdaptCounter();
 
   // Makes |video_source_restrictions_| up-to-date and informs the
   // |adaptation_listener_| if restrictions are changed, allowing the listener
   // to reconfigure the source accordingly.
   void MaybeUpdateVideoSourceRestrictions();
-  // Calculates an up-to-date value of |target_frame_rate_| and informs the
-  // |overuse_detector_| of the new value if it changed and the detector is
-  // started.
+  // Calculates an up-to-date value of the target frame rate and informs the
+  // |encode_usage_resource_| of the new value.
   void MaybeUpdateTargetFrameRate();
 
-  void UpdateAdaptationStats(AdaptReason reason);
+  // Use nullopt to disable quality scaling.
+  void UpdateQualityScalerSettings(
+      absl::optional<VideoEncoder::QpThresholds> qp_thresholds);
+
+  void UpdateAdaptationStats(AdaptationObserverInterface::AdaptReason reason);
   DegradationPreference EffectiveDegradataionPreference();
   AdaptCounter& GetAdaptCounter();
   bool CanAdaptUpResolution(int pixels, uint32_t bitrate_bps) const;
 
+  // Checks to see if we should execute the quality rampup experiment. The
+  // experiment resets all video restrictions at the start of the call in the
+  // case the bandwidth estimate is high enough.
+  // TODO(https://crbug.com/webrtc/11222) Move experiment details into an inner
+  // class.
+  void MaybePerformQualityRampupExperiment();
+  void ResetVideoSourceRestrictions();
+
   ResourceAdaptationModuleListener* const adaptation_listener_;
+  Clock* clock_;
   const bool experiment_cpu_load_estimator_;
   // The restrictions that |adaptation_listener_| is informed of.
   VideoSourceRestrictions video_source_restrictions_;
@@ -202,12 +193,17 @@ class OveruseFrameDetectorResourceAdaptationModule
   absl::optional<AdaptationRequest> last_adaptation_request_;
   // Keeps track of source restrictions that this adaptation module outputs.
   const std::unique_ptr<VideoSourceRestrictor> source_restrictor_;
-  const std::unique_ptr<OveruseFrameDetector> overuse_detector_;
-  bool overuse_detector_is_started_;
+  const std::unique_ptr<EncodeUsageResource> encode_usage_resource_;
+  const std::unique_ptr<QualityScalerResource> quality_scaler_resource_;
+  const std::unique_ptr<InitialFrameDropper> initial_frame_dropper_;
+  const bool quality_scaling_experiment_enabled_;
   absl::optional<int> last_input_frame_size_;
   absl::optional<double> target_frame_rate_;
-  absl::optional<uint32_t> target_bitrate_bps_;
-  std::unique_ptr<QualityScaler> quality_scaler_;
+  // This is the last non-zero target bitrate for the encoder.
+  absl::optional<uint32_t> encoder_target_bitrate_bps_;
+  absl::optional<VideoEncoder::RateControlParameters> encoder_rates_;
+  bool quality_rampup_done_;
+  QualityRampupExperiment quality_rampup_experiment_;
   absl::optional<EncoderSettings> encoder_settings_;
   VideoStreamEncoderObserver* const encoder_stats_observer_;
 };

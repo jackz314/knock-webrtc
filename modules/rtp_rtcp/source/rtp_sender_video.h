@@ -25,10 +25,8 @@
 #include "modules/rtp_rtcp/include/flexfec_sender.h"
 #include "modules/rtp_rtcp/include/rtp_rtcp_defines.h"
 #include "modules/rtp_rtcp/source/absolute_capture_time_sender.h"
-#include "modules/rtp_rtcp/source/playout_delay_oracle.h"
 #include "modules/rtp_rtcp/source/rtp_rtcp_config.h"
 #include "modules/rtp_rtcp/source/rtp_sender.h"
-#include "modules/rtp_rtcp/source/rtp_sequence_number_map.h"
 #include "modules/rtp_rtcp/source/rtp_video_header.h"
 #include "modules/rtp_rtcp/source/ulpfec_generator.h"
 #include "rtc_base/critical_section.h"
@@ -70,10 +68,8 @@ class RTPSenderVideo {
     Clock* clock = nullptr;
     RTPSender* rtp_sender = nullptr;
     FlexfecSender* flexfec_sender = nullptr;
-    PlayoutDelayOracle* playout_delay_oracle = nullptr;
     FrameEncryptorInterface* frame_encryptor = nullptr;
     bool require_frame_encryption = false;
-    bool need_rtp_packet_infos = false;
     bool enable_retransmit_all_layers = false;
     absl::optional<int> red_payload_type;
     absl::optional<int> ulpfec_payload_type;
@@ -82,16 +78,6 @@ class RTPSenderVideo {
 
   explicit RTPSenderVideo(const Config& config);
 
-  // TODO(bugs.webrtc.org/10809): Remove when downstream usage is gone.
-  RTPSenderVideo(Clock* clock,
-                 RTPSender* rtpSender,
-                 FlexfecSender* flexfec_sender,
-                 PlayoutDelayOracle* playout_delay_oracle,
-                 FrameEncryptorInterface* frame_encryptor,
-                 bool require_frame_encryption,
-                 bool need_rtp_packet_infos,
-                 bool enable_retransmit_all_layers,
-                 const WebRtcKeyValueConfig& field_trials);
   virtual ~RTPSenderVideo();
 
   // expected_retransmission_time_ms.has_value() -> retransmission allowed.
@@ -127,14 +113,6 @@ class RTPSenderVideo {
   // the payload overhead, eg the VP8 payload headers, not the RTP headers
   // or extension/
   uint32_t PacketizationOverheadBps() const;
-
-  // For each sequence number in |sequence_number|, recall the last RTP packet
-  // which bore it - its timestamp and whether it was the first and/or last
-  // packet in that frame. If all of the given sequence numbers could be
-  // recalled, return a vector with all of them (in corresponding order).
-  // If any could not be recalled, return an empty vector.
-  std::vector<RtpSequenceNumberMap::Info> GetSentRtpPacketInfos(
-      rtc::ArrayView<const uint16_t> sequence_numbers) const;
 
  protected:
   static uint8_t GetTemporalId(const RTPVideoHeader& header);
@@ -181,6 +159,9 @@ class RTPSenderVideo {
                                    int64_t expected_retransmission_time_ms)
       RTC_EXCLUSIVE_LOCKS_REQUIRED(stats_crit_);
 
+  void MaybeUpdateCurrentPlayoutDelay(const RTPVideoHeader& header)
+      RTC_EXCLUSIVE_LOCKS_REQUIRED(send_checker_);
+
   RTPSender* const rtp_sender_;
   Clock* const clock_;
 
@@ -195,20 +176,14 @@ class RTPSenderVideo {
   std::unique_ptr<FrameDependencyStructure> video_structure_
       RTC_GUARDED_BY(send_checker_);
 
-  // Tracks the current request for playout delay limits from application
-  // and decides whether the current RTP frame should include the playout
-  // delay extension on header.
-  PlayoutDelayOracle* const playout_delay_oracle_;
+  // Current target playout delay.
+  PlayoutDelay current_playout_delay_ RTC_GUARDED_BY(send_checker_);
+  // Flag indicating if we need to propagate |current_playout_delay_| in order
+  // to guarantee it gets delivered.
+  bool playout_delay_pending_;
 
   // Should never be held when calling out of this class.
   rtc::CriticalSection crit_;
-
-  // Maps sent packets' sequence numbers to a tuple consisting of:
-  // 1. The timestamp, without the randomizing offset mandated by the RFC.
-  // 2. Whether the packet was the first in its frame.
-  // 3. Whether the packet was the last in its frame.
-  const std::unique_ptr<RtpSequenceNumberMap> rtp_sequence_number_map_
-      RTC_PT_GUARDED_BY(crit_);
 
   // RED/ULPFEC.
   const absl::optional<int> red_payload_type_;

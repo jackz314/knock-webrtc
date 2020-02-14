@@ -283,11 +283,6 @@ class PeerConnection : public PeerConnectionInternal,
     return *data_channel_controller_.sctp_data_channels();
   }
 
-  absl::optional<std::string> sctp_content_name() const override {
-    RTC_DCHECK_RUN_ON(signaling_thread());
-    return sctp_mid_;
-  }
-
   absl::optional<std::string> sctp_transport_name() const override;
 
   cricket::CandidateStatsList GetPooledCandidateStats() const override;
@@ -324,6 +319,10 @@ class PeerConnection : public PeerConnectionInternal,
     return_histogram_very_quickly_ = true;
   }
   void RequestUsagePatternReportForTesting();
+  absl::optional<std::string> sctp_mid() {
+    RTC_DCHECK_RUN_ON(signaling_thread());
+    return sctp_mid_s_;
+  }
 
  protected:
   ~PeerConnection() override;
@@ -1331,9 +1330,11 @@ class PeerConnection : public PeerConnectionInternal,
   // Note: this is used as the data channel MID by both SCTP and data channel
   // transports.  It is set when either transport is initialized and unset when
   // both transports are deleted.
-  absl::optional<std::string>
-      sctp_mid_;  // TODO(bugs.webrtc.org/9987): Accessed on both signaling
-                  // and network thread.
+  // There is one copy on the signaling thread and another copy on the
+  // networking thread. Changes are always initiated from the signaling
+  // thread, but applied first on the networking thread via an invoke().
+  absl::optional<std::string> sctp_mid_s_ RTC_GUARDED_BY(signaling_thread());
+  absl::optional<std::string> sctp_mid_n_ RTC_GUARDED_BY(network_thread());
 
   // Whether this peer is the caller. Set when the local description is applied.
   absl::optional<bool> is_caller_ RTC_GUARDED_BY(signaling_thread());

@@ -143,6 +143,9 @@ class ModuleRtpRtcpImpl : public RtpRtcp, public RTCPReceiver::ModuleRtpRtcp {
   std::vector<std::unique_ptr<RtpPacketToSend>> GeneratePadding(
       size_t target_size_bytes) override;
 
+  std::vector<RtpSequenceNumberMap::Info> GetSentRtpPacketInfos(
+      rtc::ArrayView<const uint16_t> sequence_numbers) const override;
+
   // RTCP part.
 
   // Get RTCP status.
@@ -339,8 +342,6 @@ class ModuleRtpRtcpImpl : public RtpRtcp, public RTCPReceiver::ModuleRtpRtcp {
   uint16_t nack_last_seq_number_sent_;
 
   RemoteBitrateEstimator* const remote_bitrate_;
-
-  RtcpAckObserver* const ack_observer_;
 
   RtcpRttStats* const rtt_stats_;
 

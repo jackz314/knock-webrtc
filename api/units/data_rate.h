@@ -106,7 +106,7 @@ inline constexpr DataRate operator/(const DataSize size,
   return DataRate::bps(data_rate_impl::Microbits(size) / duration.us());
 }
 inline constexpr TimeDelta operator/(const DataSize size, const DataRate rate) {
-  return TimeDelta::us(data_rate_impl::Microbits(size) / rate.bps());
+  return TimeDelta::Micros(data_rate_impl::Microbits(size) / rate.bps());
 }
 inline constexpr DataSize operator*(const DataRate rate,
                                     const TimeDelta duration) {
@@ -126,7 +126,7 @@ inline constexpr DataSize operator/(const DataRate rate,
   return DataSize::bytes(data_rate_impl::MillibytePerSec(rate) / millihertz);
 }
 inline constexpr Frequency operator/(const DataRate rate, const DataSize size) {
-  return Frequency::millihertz(data_rate_impl::MillibytePerSec(rate) /
+  return Frequency::MilliHertz(data_rate_impl::MillibytePerSec(rate) /
                                size.bytes());
 }
 inline constexpr DataRate operator*(const DataSize size,

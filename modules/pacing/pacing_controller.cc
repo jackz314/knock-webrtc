@@ -26,17 +26,17 @@
 namespace webrtc {
 namespace {
 // Time limit in milliseconds between packet bursts.
-constexpr TimeDelta kDefaultMinPacketLimit = TimeDelta::Millis<5>();
-constexpr TimeDelta kCongestedPacketInterval = TimeDelta::Millis<500>();
+constexpr TimeDelta kDefaultMinPacketLimit = TimeDelta::Millis(5);
+constexpr TimeDelta kCongestedPacketInterval = TimeDelta::Millis(500);
 // TODO(sprang): Consider dropping this limit.
 // The maximum debt level, in terms of time, capped when sending packets.
-constexpr TimeDelta kMaxDebtInTime = TimeDelta::Millis<500>();
-constexpr TimeDelta kMaxElapsedTime = TimeDelta::Seconds<2>();
+constexpr TimeDelta kMaxDebtInTime = TimeDelta::Millis(500);
+constexpr TimeDelta kMaxElapsedTime = TimeDelta::Seconds(2);
 constexpr DataSize kDefaultPaddingTarget = DataSize::Bytes<50>();
 
 // Upper cap on process interval, in case process has not been called in a long
 // time.
-constexpr TimeDelta kMaxProcessingInterval = TimeDelta::Millis<30>();
+constexpr TimeDelta kMaxProcessingInterval = TimeDelta::Millis(30);
 
 constexpr int kFirstPriority = 0;
 
@@ -50,22 +50,22 @@ bool IsEnabled(const WebRtcKeyValueConfig& field_trials,
   return field_trials.Lookup(key).find("Enabled") == 0;
 }
 
-int GetPriorityForType(RtpPacketToSend::Type type) {
+int GetPriorityForType(RtpPacketMediaType type) {
   // Lower number takes priority over higher.
   switch (type) {
-    case RtpPacketToSend::Type::kAudio:
+    case RtpPacketMediaType::kAudio:
       // Audio is always prioritized over other packet types.
       return kFirstPriority + 1;
-    case RtpPacketToSend::Type::kRetransmission:
+    case RtpPacketMediaType::kRetransmission:
       // Send retransmissions before new media.
       return kFirstPriority + 2;
-    case RtpPacketToSend::Type::kVideo:
-    case RtpPacketToSend::Type::kForwardErrorCorrection:
+    case RtpPacketMediaType::kVideo:
+    case RtpPacketMediaType::kForwardErrorCorrection:
       // Video has "normal" priority, in the old speak.
       // Send redundancy concurrently to video. If it is delayed it might have a
       // lower chance of being useful.
       return kFirstPriority + 3;
-    case RtpPacketToSend::Type::kPadding:
+    case RtpPacketMediaType::kPadding:
       // Packets that are in themselves likely useless, only sent to keep the
       // BWE high.
       return kFirstPriority + 4;
@@ -75,11 +75,11 @@ int GetPriorityForType(RtpPacketToSend::Type type) {
 }  // namespace
 
 const TimeDelta PacingController::kMaxExpectedQueueLength =
-    TimeDelta::Millis<2000>();
+    TimeDelta::Millis(2000);
 const float PacingController::kDefaultPaceMultiplier = 2.5f;
 const TimeDelta PacingController::kPausedProcessInterval =
     kCongestedPacketInterval;
-const TimeDelta PacingController::kMinSleepTime = TimeDelta::Millis<1>();
+const TimeDelta PacingController::kMinSleepTime = TimeDelta::Millis(1);
 
 PacingController::PacingController(Clock* clock,
                                    PacketSender* packet_sender,
@@ -130,7 +130,7 @@ PacingController::PacingController(Clock* clock,
   FieldTrialParameter<int> min_packet_limit_ms("", min_packet_limit_.ms());
   ParseFieldTrial({&min_packet_limit_ms},
                   field_trials_->Lookup("WebRTC-Pacer-MinPacketLimitMs"));
-  min_packet_limit_ = TimeDelta::ms(min_packet_limit_ms.Get());
+  min_packet_limit_ = TimeDelta::Millis(min_packet_limit_ms.Get());
   UpdateBudgetWithElapsedTime(min_packet_limit_);
 }
 
@@ -242,7 +242,7 @@ void PacingController::SetTransportOverhead(DataSize overhead_per_packet) {
 
 TimeDelta PacingController::ExpectedQueueTime() const {
   RTC_DCHECK_GT(pacing_bitrate_, DataRate::Zero());
-  return TimeDelta::ms(
+  return TimeDelta::Millis(
       (QueueSizeData().bytes() * 8 * rtc::kNumMillisecsPerSec) /
       pacing_bitrate_.bps());
 }
@@ -439,7 +439,7 @@ void PacingController::ProcessPackets() {
       packet_queue_.UpdateQueueTime(now);
       if (drain_large_queues_) {
         TimeDelta avg_time_left =
-            std::max(TimeDelta::ms(1),
+            std::max(TimeDelta::Millis(1),
                      queue_time_limit - packet_queue_.AverageQueueTime());
         DataRate min_rate_needed = queue_size_data / avg_time_left;
         if (min_rate_needed > target_rate) {
@@ -530,7 +530,7 @@ void PacingController::ProcessPackets() {
 
     RTC_DCHECK(rtp_packet);
     RTC_DCHECK(rtp_packet->packet_type().has_value());
-    const RtpPacketToSend::Type packet_type = *rtp_packet->packet_type();
+    const RtpPacketMediaType packet_type = *rtp_packet->packet_type();
     DataSize packet_size = DataSize::bytes(rtp_packet->payload_size() +
                                            rtp_packet->padding_size());
 
@@ -643,13 +643,13 @@ std::unique_ptr<RtpPacketToSend> PacingController::GetPendingPacket(
   return packet_queue_.Pop();
 }
 
-void PacingController::OnPacketSent(RtpPacketToSend::Type packet_type,
+void PacingController::OnPacketSent(RtpPacketMediaType packet_type,
                                     DataSize packet_size,
                                     Timestamp send_time) {
   if (!first_sent_packet_time_) {
     first_sent_packet_time_ = send_time;
   }
-  bool audio_packet = packet_type == RtpPacketToSend::Type::kAudio;
+  bool audio_packet = packet_type == RtpPacketMediaType::kAudio;
   if (!audio_packet || account_for_audio_) {
     // Update media bytes sent.
     UpdateBudgetWithSentData(packet_size);
