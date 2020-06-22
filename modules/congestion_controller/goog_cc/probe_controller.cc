@@ -15,6 +15,7 @@
 #include <memory>
 #include <string>
 
+#include "absl/strings/match.h"
 #include "api/units/data_rate.h"
 #include "api/units/time_delta.h"
 #include "api/units/timestamp.h"
@@ -129,12 +130,12 @@ ProbeControllerConfig::~ProbeControllerConfig() = default;
 ProbeController::ProbeController(const WebRtcKeyValueConfig* key_value_config,
                                  RtcEventLog* event_log)
     : enable_periodic_alr_probing_(false),
-      in_rapid_recovery_experiment_(
-          key_value_config->Lookup(kBweRapidRecoveryExperiment)
-              .find("Enabled") == 0),
-      limit_probes_with_allocateable_rate_(
-          key_value_config->Lookup(kCappedProbingFieldTrialName)
-              .find("Disabled") != 0),
+      in_rapid_recovery_experiment_(absl::StartsWith(
+          key_value_config->Lookup(kBweRapidRecoveryExperiment),
+          "Enabled")),
+      limit_probes_with_allocateable_rate_(!absl::StartsWith(
+          key_value_config->Lookup(kCappedProbingFieldTrialName),
+          "Disabled")),
       event_log_(event_log),
       config_(ProbeControllerConfig(key_value_config)) {
   Reset(0);
@@ -209,14 +210,15 @@ std::vector<ProbeClusterConfig> ProbeController::OnMaxTotalAllocatedBitrate(
     if (!config_.first_allocation_probe_scale)
       return std::vector<ProbeClusterConfig>();
 
-    DataRate first_probe_rate = DataRate::bps(max_total_allocated_bitrate) *
-                                config_.first_allocation_probe_scale.Value();
+    DataRate first_probe_rate =
+        DataRate::BitsPerSec(max_total_allocated_bitrate) *
+        config_.first_allocation_probe_scale.Value();
     DataRate probe_cap = config_.allocation_probe_max.Get();
     first_probe_rate = std::min(first_probe_rate, probe_cap);
     std::vector<int64_t> probes = {first_probe_rate.bps()};
     if (config_.second_allocation_probe_scale) {
       DataRate second_probe_rate =
-          DataRate::bps(max_total_allocated_bitrate) *
+          DataRate::BitsPerSec(max_total_allocated_bitrate) *
           config_.second_allocation_probe_scale.Value();
       second_probe_rate = std::min(second_probe_rate, probe_cap);
       if (second_probe_rate > first_probe_rate)
@@ -425,7 +427,8 @@ std::vector<ProbeClusterConfig> ProbeController::InitiateProbing(
 
     ProbeClusterConfig config;
     config.at_time = Timestamp::Millis(now_ms);
-    config.target_data_rate = DataRate::bps(rtc::dchecked_cast<int>(bitrate));
+    config.target_data_rate =
+        DataRate::BitsPerSec(rtc::dchecked_cast<int>(bitrate));
     config.target_duration = TimeDelta::Millis(kMinProbeDurationMs);
     config.target_probe_count = kMinProbePacketsSent;
     config.id = next_probe_cluster_id_;

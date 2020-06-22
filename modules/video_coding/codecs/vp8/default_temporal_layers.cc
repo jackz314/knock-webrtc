@@ -164,6 +164,12 @@ DefaultTemporalLayers::GetDependencyInfo(size_t num_layers) {
         // TL1  references 'last' and references and updates 'golden'.
         // TL2 references both 'last' & 'golden' and references and updates
         // 'arf'.
+        //     2-------2       2-------2       2
+        //    /     __/       /     __/       /
+        //   /   __1         /   __1         /
+        //  /___/           /___/           /
+        // 0---------------0---------------0-----
+        // 0   1   2   3   4   5   6   7   8   9 ...
         return {{"SSS", {kReferenceAndUpdate, kNone, kNone}},
                 {"--S", {kReference, kNone, kUpdate}},
                 {"-DR", {kReference, kUpdate, kNone}},
@@ -174,6 +180,12 @@ DefaultTemporalLayers::GetDependencyInfo(size_t num_layers) {
         // TL0 also references and updates the 'last' buffer.
         // TL1 also references 'last' and references and updates 'golden'.
         // TL2 references both 'last' and 'golden' but updates no buffer.
+        //     2     __2  _____2     __2       2
+        //    /     /____/    /     /         /
+        //   /     1---------/-----1         /
+        //  /_____/         /_____/         /
+        // 0---------------0---------------0-----
+        // 0   1   2   3   4   5   6   7   8   9 ...
         return {{"SSS", {kReferenceAndUpdate, kNone, kNone}},
                 {"--D", {kReference, kNone, kNone, kFreezeEntropy}},
                 {"-SS", {kReference, kUpdate, kNone}},
@@ -554,10 +566,14 @@ void DefaultTemporalLayers::OnEncodeDone(size_t stream_index,
   // subsequent frames.
   if (is_keyframe) {
     info->template_structure = GetTemplateStructure(num_layers_);
+    generic_frame_info.decode_target_indications =
+        temporal_pattern_.front().decode_target_indications;
+    generic_frame_info.temporal_id = 0;
+  } else {
+    generic_frame_info.decode_target_indications =
+        frame.dependency_info.decode_target_indications;
+    generic_frame_info.temporal_id = frame_config.packetizer_temporal_idx;
   }
-  generic_frame_info.decode_target_indications =
-      frame.dependency_info.decode_target_indications;
-  generic_frame_info.temporal_id = frame_config.packetizer_temporal_idx;
 
   if (!frame.expired) {
     for (Vp8BufferReference buffer : kAllBuffers) {
@@ -592,48 +608,52 @@ FrameDependencyStructure DefaultTemporalLayers::GetTemplateStructure(
   FrameDependencyStructure template_structure;
   template_structure.num_decode_targets = num_layers;
 
-  using Builder = GenericFrameInfo::Builder;
   switch (num_layers) {
     case 1: {
-      template_structure.templates = {
-          Builder().T(0).Dtis("S").Build(),
-          Builder().T(0).Dtis("S").Fdiffs({1}).Build(),
-      };
+      template_structure.templates.resize(2);
+      template_structure.templates[0].T(0).Dtis("S");
+      template_structure.templates[1].T(0).Dtis("S").FrameDiffs({1});
       return template_structure;
     }
     case 2: {
-      template_structure.templates = {
-          Builder().T(0).Dtis("SS").Build(),
-          Builder().T(0).Dtis("SS").Fdiffs({2}).Build(),
-          Builder().T(0).Dtis("SR").Fdiffs({2}).Build(),
-          Builder().T(1).Dtis("-S").Fdiffs({1}).Build(),
-          Builder().T(1).Dtis("-D").Fdiffs({1, 2}).Build(),
-      };
+      template_structure.templates.resize(5);
+      template_structure.templates[0].T(0).Dtis("SS");
+      template_structure.templates[1].T(0).Dtis("SS").FrameDiffs({2});
+      template_structure.templates[2].T(0).Dtis("SR").FrameDiffs({2});
+      template_structure.templates[3].T(1).Dtis("-S").FrameDiffs({1});
+      template_structure.templates[4].T(1).Dtis("-D").FrameDiffs({2, 1});
       return template_structure;
     }
     case 3: {
-      template_structure.templates = {
-          Builder().T(0).Dtis("SSS").Build(),
-          Builder().T(0).Dtis("SSS").Fdiffs({4}).Build(),
-          Builder().T(0).Dtis("SRR").Fdiffs({4}).Build(),
-          Builder().T(1).Dtis("-SR").Fdiffs({2}).Build(),
-          Builder().T(1).Dtis("-DR").Fdiffs({2, 4}).Build(),
-          Builder().T(2).Dtis("--D").Fdiffs({1}).Build(),
-          Builder().T(2).Dtis("--D").Fdiffs({1, 3}).Build(),
-      };
+      if (field_trial::IsEnabled("WebRTC-UseShortVP8TL3Pattern")) {
+        template_structure.templates.resize(5);
+        template_structure.templates[0].T(0).Dtis("SSS");
+        template_structure.templates[1].T(0).Dtis("SSS").FrameDiffs({4});
+        template_structure.templates[2].T(1).Dtis("-DR").FrameDiffs({2});
+        template_structure.templates[3].T(2).Dtis("--S").FrameDiffs({1});
+        template_structure.templates[4].T(2).Dtis("--D").FrameDiffs({2, 1});
+      } else {
+        template_structure.templates.resize(7);
+        template_structure.templates[0].T(0).Dtis("SSS");
+        template_structure.templates[1].T(0).Dtis("SSS").FrameDiffs({4});
+        template_structure.templates[2].T(0).Dtis("SRR").FrameDiffs({4});
+        template_structure.templates[3].T(1).Dtis("-SS").FrameDiffs({2});
+        template_structure.templates[4].T(1).Dtis("-DS").FrameDiffs({4, 2});
+        template_structure.templates[5].T(2).Dtis("--D").FrameDiffs({1});
+        template_structure.templates[6].T(2).Dtis("--D").FrameDiffs({3, 1});
+      }
       return template_structure;
     }
     case 4: {
-      template_structure.templates = {
-          Builder().T(0).Dtis("SSSS").Build(),
-          Builder().T(0).Dtis("SSSS").Fdiffs({8}).Build(),
-          Builder().T(1).Dtis("-SRR").Fdiffs({4}).Build(),
-          Builder().T(1).Dtis("-SRR").Fdiffs({4, 8}).Build(),
-          Builder().T(2).Dtis("--SR").Fdiffs({2}).Build(),
-          Builder().T(2).Dtis("--SR").Fdiffs({2, 4}).Build(),
-          Builder().T(3).Dtis("---D").Fdiffs({1}).Build(),
-          Builder().T(3).Dtis("---D").Fdiffs({1, 3}).Build(),
-      };
+      template_structure.templates.resize(8);
+      template_structure.templates[0].T(0).Dtis("SSSS");
+      template_structure.templates[1].T(0).Dtis("SSSS").FrameDiffs({8});
+      template_structure.templates[2].T(1).Dtis("-SRR").FrameDiffs({4});
+      template_structure.templates[3].T(1).Dtis("-SRR").FrameDiffs({4, 8});
+      template_structure.templates[4].T(2).Dtis("--SR").FrameDiffs({2});
+      template_structure.templates[5].T(2).Dtis("--SR").FrameDiffs({2, 4});
+      template_structure.templates[6].T(3).Dtis("---D").FrameDiffs({1});
+      template_structure.templates[7].T(3).Dtis("---D").FrameDiffs({1, 3});
       return template_structure;
     }
     default:

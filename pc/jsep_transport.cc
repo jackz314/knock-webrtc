@@ -88,9 +88,7 @@ JsepTransport::JsepTransport(
     std::unique_ptr<webrtc::RtpTransportInternal> datagram_rtp_transport,
     std::unique_ptr<DtlsTransportInternal> rtp_dtls_transport,
     std::unique_ptr<DtlsTransportInternal> rtcp_dtls_transport,
-    std::unique_ptr<SctpTransportInternal> sctp_transport,
-    std::unique_ptr<webrtc::DatagramTransportInterface> datagram_transport,
-    webrtc::DataChannelTransportInterface* data_channel_transport)
+    std::unique_ptr<SctpTransportInternal> sctp_transport)
     : network_thread_(rtc::Thread::Current()),
       mid_(mid),
       local_certificate_(local_certificate),
@@ -115,10 +113,7 @@ JsepTransport::JsepTransport(
       sctp_transport_(sctp_transport
                           ? new rtc::RefCountedObject<webrtc::SctpTransport>(
                                 std::move(sctp_transport))
-                          : nullptr),
-      datagram_transport_(std::move(datagram_transport)),
-      datagram_rtp_transport_(std::move(datagram_rtp_transport)),
-      data_channel_transport_(data_channel_transport) {
+                          : nullptr) {
   RTC_DCHECK(ice_transport_);
   RTC_DCHECK(rtp_dtls_transport_);
   // |rtcp_ice_transport_| must be present iff |rtcp_dtls_transport_| is
@@ -178,16 +173,15 @@ webrtc::RTCError JsepTransport::SetLocalJsepTransportDescription(
 
   RTC_DCHECK_RUN_ON(network_thread_);
 
-  webrtc::RTCErrorOr<IceParameters> ice_parameters_result =
-      IceParameters::Parse(jsep_description.transport_desc.ice_ufrag,
-                           jsep_description.transport_desc.ice_pwd);
+  IceParameters ice_parameters =
+      jsep_description.transport_desc.GetIceParameters();
+  webrtc::RTCError ice_parameters_result = ice_parameters.Validate();
   if (!ice_parameters_result.ok()) {
     rtc::StringBuilder sb;
-    sb << "Invalid ICE parameters: " << ice_parameters_result.error().message();
+    sb << "Invalid ICE parameters: " << ice_parameters_result.message();
     return webrtc::RTCError(webrtc::RTCErrorType::INVALID_PARAMETER,
                             sb.Release());
   }
-  IceParameters ice_parameters = ice_parameters_result.MoveValue();
 
   if (!SetRtcpMux(jsep_description.rtcp_mux_enabled, type,
                   ContentSource::CS_LOCAL)) {
@@ -273,17 +267,16 @@ webrtc::RTCError JsepTransport::SetRemoteJsepTransportDescription(
 
   RTC_DCHECK_RUN_ON(network_thread_);
 
-  webrtc::RTCErrorOr<IceParameters> ice_parameters_result =
-      IceParameters::Parse(jsep_description.transport_desc.ice_ufrag,
-                           jsep_description.transport_desc.ice_pwd);
+  IceParameters ice_parameters =
+      jsep_description.transport_desc.GetIceParameters();
+  webrtc::RTCError ice_parameters_result = ice_parameters.Validate();
   if (!ice_parameters_result.ok()) {
     remote_description_.reset();
     rtc::StringBuilder sb;
-    sb << "Invalid ICE parameters: " << ice_parameters_result.error().message();
+    sb << "Invalid ICE parameters: " << ice_parameters_result.message();
     return webrtc::RTCError(webrtc::RTCErrorType::INVALID_PARAMETER,
                             sb.Release());
   }
-  IceParameters ice_parameters = ice_parameters_result.MoveValue();
 
   if (!SetRtcpMux(jsep_description.rtcp_mux_enabled, type,
                   ContentSource::CS_REMOTE)) {
@@ -385,18 +378,6 @@ absl::optional<rtc::SSLRole> JsepTransport::GetDtlsRole() const {
   return absl::optional<rtc::SSLRole>(dtls_role);
 }
 
-absl::optional<OpaqueTransportParameters>
-JsepTransport::GetTransportParameters() const {
-  rtc::CritScope scope(&accessor_lock_);
-  if (!datagram_transport()) {
-    return absl::nullopt;
-  }
-
-  OpaqueTransportParameters params;
-  params.parameters = datagram_transport()->GetTransportParameters();
-  return params;
-}
-
 bool JsepTransport::GetStats(TransportStats* stats) {
   RTC_DCHECK_RUN_ON(network_thread_);
   rtc::CritScope scope(&accessor_lock_);
@@ -464,7 +445,6 @@ webrtc::RTCError JsepTransport::SetNegotiatedDtlsParameters(
     DtlsTransportInternal* dtls_transport,
     absl::optional<rtc::SSLRole> dtls_role,
     rtc::SSLFingerprint* remote_fingerprint) {
-  RTC_DCHECK_RUN_ON(network_thread_);
   RTC_DCHECK(dtls_transport);
   // Set SSL role. Role must be set before fingerprint is applied, which
   // initiates DTLS setup.
@@ -537,7 +517,7 @@ void JsepTransport::ActivateRtcpMux() {
       RTC_DCHECK(dtls_srtp_transport_);
       RTC_DCHECK(!unencrypted_rtp_transport_);
       RTC_DCHECK(!sdes_transport_);
-      dtls_srtp_transport_->SetDtlsTransports(rtp_dtls_transport(),
+      dtls_srtp_transport_->SetDtlsTransports(rtp_dtls_transport_locked(),
                                               /*rtcp_dtls_transport=*/nullptr);
     }
     rtcp_dtls_transport_ = nullptr;  // Destroy this reference.
@@ -551,7 +531,6 @@ bool JsepTransport::SetSdes(const std::vector<CryptoParams>& cryptos,
                             webrtc::SdpType type,
                             ContentSource source) {
   RTC_DCHECK_RUN_ON(network_thread_);
-  rtc::CritScope scope(&accessor_lock_);
   bool ret = false;
   ret = sdes_negotiator_.Process(cryptos, type, source);
   if (!ret) {
@@ -736,7 +715,6 @@ webrtc::RTCError JsepTransport::NegotiateDtlsRole(
 bool JsepTransport::GetTransportStats(DtlsTransportInternal* dtls_transport,
                                       TransportStats* stats) {
   RTC_DCHECK_RUN_ON(network_thread_);
-  rtc::CritScope scope(&accessor_lock_);
   RTC_DCHECK(dtls_transport);
   TransportChannelStats substats;
   if (rtcp_dtls_transport_) {
@@ -758,106 +736,10 @@ bool JsepTransport::GetTransportStats(DtlsTransportInternal* dtls_transport,
   return true;
 }
 
+// TODO(nisse): Delete.
 void JsepTransport::NegotiateDatagramTransport(SdpType type) {
   RTC_DCHECK(type == SdpType::kAnswer || type == SdpType::kPrAnswer);
-  rtc::CritScope lock(&accessor_lock_);
-  if (!datagram_transport_) {
-    return;  // No need to negotiate the use of datagram transport.
-  }
-
-  bool compatible_datagram_transport = false;
-  if (datagram_transport_ &&
-      local_description_->transport_desc.opaque_parameters &&
-      remote_description_->transport_desc.opaque_parameters) {
-    // If both descriptions have datagram transport parameters, and the remote
-    // parameters are accepted by the datagram transport, then use the datagram
-    // transport.  Otherwise, fall back to RTP.
-    compatible_datagram_transport =
-        datagram_transport_
-            ->SetRemoteTransportParameters(remote_description_->transport_desc
-                                               .opaque_parameters->parameters)
-            .ok();
-  }
-
-  bool use_datagram_transport_for_media =
-      compatible_datagram_transport &&
-      remote_description_->media_alt_protocol ==
-          remote_description_->transport_desc.opaque_parameters->protocol &&
-      remote_description_->media_alt_protocol ==
-          local_description_->media_alt_protocol;
-
-  bool use_datagram_transport_for_data =
-      compatible_datagram_transport &&
-      remote_description_->data_alt_protocol ==
-          remote_description_->transport_desc.opaque_parameters->protocol &&
-      remote_description_->data_alt_protocol ==
-          local_description_->data_alt_protocol;
-
-  RTC_LOG(LS_INFO)
-      << "Negotiating datagram transport, use_datagram_transport_for_media="
-      << use_datagram_transport_for_media
-      << ", use_datagram_transport_for_data=" << use_datagram_transport_for_data
-      << " answer type=" << (type == SdpType::kAnswer ? "answer" : "pr_answer");
-
-  // A provisional or full or answer lets the peer start sending on one of the
-  // transports.
-  if (composite_rtp_transport_) {
-    composite_rtp_transport_->SetSendTransport(
-        use_datagram_transport_for_media ? datagram_rtp_transport_.get()
-                                         : default_rtp_transport());
-  }
-  if (composite_data_channel_transport_) {
-    composite_data_channel_transport_->SetSendTransport(
-        use_datagram_transport_for_data ? data_channel_transport_
-                                        : sctp_data_channel_transport_.get());
-  }
-
-  if (type != SdpType::kAnswer) {
-    return;
-  }
-
-  if (composite_rtp_transport_) {
-    if (use_datagram_transport_for_media) {
-      // Negotiated use of datagram transport for RTP, so remove the
-      // non-datagram RTP transport.
-      composite_rtp_transport_->RemoveTransport(default_rtp_transport());
-      if (unencrypted_rtp_transport_) {
-        unencrypted_rtp_transport_ = nullptr;
-      } else if (sdes_transport_) {
-        sdes_transport_ = nullptr;
-      } else {
-        dtls_srtp_transport_ = nullptr;
-      }
-    } else {
-      composite_rtp_transport_->RemoveTransport(datagram_rtp_transport_.get());
-      datagram_rtp_transport_ = nullptr;
-    }
-  }
-
-  if (composite_data_channel_transport_) {
-    if (use_datagram_transport_for_data) {
-      // Negotiated use of datagram transport for data channels, so remove the
-      // non-datagram data channel transport.
-      composite_data_channel_transport_->RemoveTransport(
-          sctp_data_channel_transport_.get());
-      sctp_data_channel_transport_ = nullptr;
-      sctp_transport_ = nullptr;
-    } else {
-      composite_data_channel_transport_->RemoveTransport(
-          data_channel_transport_);
-      data_channel_transport_ = nullptr;
-    }
-  } else if (data_channel_transport_ && !use_datagram_transport_for_data) {
-    // The datagram transport has been rejected without a fallback.  We still
-    // need to inform the application and delete it.
-    SignalDataChannelTransportNegotiated(this, nullptr);
-    data_channel_transport_ = nullptr;
-  }
-
-  if (!use_datagram_transport_for_media && !use_datagram_transport_for_data) {
-    // Datagram transport is not being used for anything, so clean it up.
-    datagram_transport_ = nullptr;
-  }
+  return;  // No need to negotiate the use of datagram transport.
 }
 
 }  // namespace cricket

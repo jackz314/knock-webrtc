@@ -118,6 +118,8 @@ rtc_library("rtp_rtcp_format") {
     "../../rtc_base/system:unused",
     "../../system_wrappers",
     "../video_coding:codec_globals_headers",
+  ]
+  absl_deps = [
     "//third_party/abseil-cpp/absl/algorithm:container",
     "//third_party/abseil-cpp/absl/strings",
     "//third_party/abseil-cpp/absl/types:optional",
@@ -132,7 +134,7 @@ rtc_library("rtp_rtcp") {
     "include/flexfec_sender.h",
     "include/receive_statistics.h",
     "include/remote_ntp_time_estimator.h",
-    "include/rtp_rtcp.h",
+    "include/rtp_rtcp.h",  # deprecated
     "include/ulpfec_receiver.h",
     "source/absolute_capture_time_receiver.cc",
     "source/absolute_capture_time_receiver.h",
@@ -140,6 +142,8 @@ rtc_library("rtp_rtcp") {
     "source/absolute_capture_time_sender.h",
     "source/create_video_rtp_depacketizer.cc",
     "source/create_video_rtp_depacketizer.h",
+    "source/deprecated/deprecated_rtp_sender_egress.cc",
+    "source/deprecated/deprecated_rtp_sender_egress.h",
     "source/dtmf_queue.cc",
     "source/dtmf_queue.h",
     "source/fec_private_tables_bursty.cc",
@@ -165,6 +169,8 @@ rtc_library("rtp_rtcp") {
     "source/rtcp_receiver.h",
     "source/rtcp_sender.cc",
     "source/rtcp_sender.h",
+    "source/rtp_descriptor_authentication.cc",
+    "source/rtp_descriptor_authentication.h",
     "source/rtp_format.cc",
     "source/rtp_format.h",
     "source/rtp_format_h264.cc",
@@ -184,6 +190,9 @@ rtc_library("rtp_rtcp") {
     "source/rtp_rtcp_config.h",
     "source/rtp_rtcp_impl.cc",
     "source/rtp_rtcp_impl.h",
+    "source/rtp_rtcp_impl2.cc",
+    "source/rtp_rtcp_impl2.h",
+    "source/rtp_rtcp_interface.h",
     "source/rtp_sender.cc",
     "source/rtp_sender.h",
     "source/rtp_sender_audio.cc",
@@ -192,6 +201,8 @@ rtc_library("rtp_rtcp") {
     "source/rtp_sender_egress.h",
     "source/rtp_sender_video.cc",
     "source/rtp_sender_video.h",
+    "source/rtp_sender_video_frame_transformer_delegate.cc",
+    "source/rtp_sender_video_frame_transformer_delegate.h",
     "source/rtp_sequence_number_map.cc",
     "source/rtp_sequence_number_map.h",
     "source/rtp_utility.cc",
@@ -208,6 +219,8 @@ rtc_library("rtp_rtcp") {
     "source/ulpfec_header_reader_writer.h",
     "source/ulpfec_receiver_impl.cc",
     "source/ulpfec_receiver_impl.h",
+    "source/video_fec_generator.h",
+    "source/video_rtp_depacketizer.cc",
     "source/video_rtp_depacketizer.h",
     "source/video_rtp_depacketizer_av1.cc",
     "source/video_rtp_depacketizer_av1.h",
@@ -237,6 +250,7 @@ rtc_library("rtp_rtcp") {
     "..:module_fec_api",
     "../..:webrtc_common",
     "../../api:array_view",
+    "../../api:frame_transformer_interface",
     "../../api:function_view",
     "../../api:libjingle_peerconnection_api",
     "../../api:rtp_headers",
@@ -247,6 +261,7 @@ rtc_library("rtp_rtcp") {
     "../../api/audio_codecs:audio_codecs_api",
     "../../api/crypto:frame_encryptor_interface",
     "../../api/rtc_event_log",
+    "../../api/task_queue:task_queue",
     "../../api/transport:field_trial_based_config",
     "../../api/transport:webrtc_key_value_config",
     "../../api/transport/rtp:dependency_descriptor",
@@ -254,6 +269,7 @@ rtc_library("rtp_rtcp") {
     "../../api/units:data_rate",
     "../../api/units:time_delta",
     "../../api/units:timestamp",
+    "../../api/video:encoded_frame",
     "../../api/video:encoded_image",
     "../../api/video:video_bitrate_allocation",
     "../../api/video:video_bitrate_allocator",
@@ -275,12 +291,16 @@ rtc_library("rtp_rtcp") {
     "../../rtc_base:rtc_base_approved",
     "../../rtc_base:rtc_numerics",
     "../../rtc_base:safe_minmax",
+    "../../rtc_base/experiments:field_trial_parser",
     "../../rtc_base/synchronization:sequence_checker",
+    "../../rtc_base/task_utils:to_queued_task",
     "../../rtc_base/time:timestamp_extrapolator",
     "../../system_wrappers",
     "../../system_wrappers:metrics",
     "../remote_bitrate_estimator",
     "../video_coding:codec_globals_headers",
+  ]
+  absl_deps = [
     "//third_party/abseil-cpp/absl/algorithm:container",
     "//third_party/abseil-cpp/absl/base:core_headers",
     "//third_party/abseil-cpp/absl/container:inlined_vector",
@@ -310,13 +330,15 @@ rtc_library("rtcp_transceiver") {
     "../../api:array_view",
     "../../api:rtp_headers",
     "../../api:transport_api",
+    "../../api/task_queue",
     "../../api/video:video_bitrate_allocation",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
-    "../../rtc_base:rtc_task_queue",
     "../../rtc_base/task_utils:repeating_task",
     "../../rtc_base/task_utils:to_queued_task",
     "../../system_wrappers",
+  ]
+  absl_deps = [
     "//third_party/abseil-cpp/absl/algorithm:container",
     "//third_party/abseil-cpp/absl/memory",
     "//third_party/abseil-cpp/absl/types:optional",
@@ -336,6 +358,8 @@ rtc_library("rtp_video_header") {
     "../../api/video:video_frame_type",
     "../../api/video:video_rtp_headers",
     "../../modules/video_coding:codec_globals_headers",
+  ]
+  absl_deps = [
     "//third_party/abseil-cpp/absl/container:inlined_vector",
     "//third_party/abseil-cpp/absl/types:optional",
     "//third_party/abseil-cpp/absl/types:variant",
@@ -359,12 +383,6 @@ rtc_library("fec_test_helper") {
 
 rtc_library("mock_rtp_rtcp") {
   testonly = true
-  sources = [
-    "mocks/mock_recovered_packet_receiver.cc",
-    "mocks/mock_rtcp_bandwidth_observer.cc",
-    "mocks/mock_rtcp_rtt_stats.cc",
-    "mocks/mock_rtp_rtcp.cc",
-  ]
   public = [
     "mocks/mock_recovered_packet_receiver.h",
     "mocks/mock_rtcp_bandwidth_observer.h",
@@ -379,8 +397,8 @@ rtc_library("mock_rtp_rtcp") {
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
     "../../test:test_support",
-    "//third_party/abseil-cpp/absl/types:optional",
   ]
+  absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
 }
 
 if (rtc_include_tests) {
@@ -458,6 +476,7 @@ if (rtc_include_tests) {
       "source/rtcp_sender_unittest.cc",
       "source/rtcp_transceiver_impl_unittest.cc",
       "source/rtcp_transceiver_unittest.cc",
+      "source/rtp_dependency_descriptor_extension_unittest.cc",
       "source/rtp_fec_unittest.cc",
       "source/rtp_format_h264_unittest.cc",
       "source/rtp_format_unittest.cc",
@@ -472,6 +491,7 @@ if (rtc_include_tests) {
       "source/rtp_packet_history_unittest.cc",
       "source/rtp_packet_unittest.cc",
       "source/rtp_packetizer_av1_unittest.cc",
+      "source/rtp_rtcp_impl2_unittest.cc",
       "source/rtp_rtcp_impl_unittest.cc",
       "source/rtp_sender_audio_unittest.cc",
       "source/rtp_sender_unittest.cc",
@@ -500,6 +520,7 @@ if (rtc_include_tests) {
       "../..:webrtc_common",
       "../../api:array_view",
       "../../api:libjingle_peerconnection_api",
+      "../../api:mock_frame_encryptor",
       "../../api:rtp_headers",
       "../../api:rtp_packet_info",
       "../../api:rtp_parameters",
@@ -529,10 +550,14 @@ if (rtc_include_tests) {
       "../../rtc_base:task_queue_for_test",
       "../../system_wrappers",
       "../../test:field_trial",
+      "../../test:mock_frame_transformer",
+      "../../test:mock_transport",
       "../../test:rtp_test_utils",
       "../../test:test_common",
       "../../test:test_support",
       "../video_coding:codec_globals_headers",
+    ]
+    absl_deps = [
       "//third_party/abseil-cpp/absl/algorithm:container",
       "//third_party/abseil-cpp/absl/base:core_headers",
       "//third_party/abseil-cpp/absl/memory",

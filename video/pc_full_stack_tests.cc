@@ -12,8 +12,11 @@
 #include <utility>
 #include <vector>
 
+#include "api/media_stream_interface.h"
 #include "api/test/create_network_emulation_manager.h"
+#include "api/test/create_peer_connection_quality_test_frame_generator.h"
 #include "api/test/create_peerconnection_quality_test_fixture.h"
+#include "api/test/frame_generator_interface.h"
 #include "api/test/network_emulation_manager.h"
 #include "api/test/peerconnection_quality_test_fixture.h"
 #include "api/test/simulated_network.h"
@@ -35,8 +38,6 @@ using VideoConfig =
     webrtc_pc_e2e::PeerConnectionE2EQualityTestFixture::VideoConfig;
 using AudioConfig =
     webrtc_pc_e2e::PeerConnectionE2EQualityTestFixture::AudioConfig;
-using VideoGeneratorType =
-    webrtc_pc_e2e::PeerConnectionE2EQualityTestFixture::VideoGeneratorType;
 using ScreenShareConfig =
     webrtc_pc_e2e::PeerConnectionE2EQualityTestFixture::ScreenShareConfig;
 using VideoSimulcastConfig =
@@ -105,24 +106,6 @@ std::string ClipNameToClipPath(const char* clip_name) {
 
 }  // namespace
 
-class PCGenericDescriptorTest : public ::testing::TestWithParam<std::string> {
- public:
-  PCGenericDescriptorTest()
-      : field_trial_(AppendFieldTrials(GetParam())),
-        generic_descriptor_enabled_(
-            field_trial::IsEnabled("WebRTC-GenericDescriptor")) {}
-
-  std::string GetTestName(std::string base) {
-    if (generic_descriptor_enabled_)
-      base += "_generic_descriptor";
-    return base;
-  }
-
- private:
-  test::ScopedFieldTrials field_trial_;
-  bool generic_descriptor_enabled_;
-};
-
 #if defined(RTC_ENABLE_VP9)
 TEST(PCFullStackTest, ForemanCifWithoutPacketLossVp9) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
@@ -133,9 +116,10 @@ TEST(PCFullStackTest, ForemanCifWithoutPacketLossVp9) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -147,20 +131,21 @@ TEST(PCFullStackTest, ForemanCifWithoutPacketLossVp9) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCifPlr5Vp9) {
+TEST(PCGenericDescriptorTest, ForemanCifPlr5Vp9) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
   config.loss_percent = 5;
   config.queue_delay_ms = 50;
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_delay_50_0_plr_5_VP9"),
+      "pc_foreman_cif_delay_50_0_plr_5_VP9_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -191,9 +176,10 @@ TEST(PCFullStackTest, MAYBE_GeneratorWithoutPacketLossVp9Profile2) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.generator = VideoGeneratorType::kI010;
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateSquareFrameGenerator(
+            video, test::FrameGeneratorInterface::OutputType::kI010);
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -246,9 +232,10 @@ TEST(PCFullStackTest, ParisQcifWithoutPacketLoss) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(176, 144, 30);
-        video.input_file_name = ClipNameToClipPath("paris_qcif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("paris_qcif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -258,18 +245,19 @@ TEST(PCFullStackTest, ParisQcifWithoutPacketLoss) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCifWithoutPacketLoss) {
+TEST(PCGenericDescriptorTest, ForemanCifWithoutPacketLoss) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_net_delay_0_0_plr_0"),
+      "pc_foreman_cif_net_delay_0_0_plr_0_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(),
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -279,18 +267,19 @@ TEST_P(PCGenericDescriptorTest, ForemanCifWithoutPacketLoss) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCif30kbpsWithoutPacketLoss) {
+TEST(PCGenericDescriptorTest, ForemanCif30kbpsWithoutPacketLoss) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_30kbps_net_delay_0_0_plr_0"),
+      "pc_foreman_cif_30kbps_net_delay_0_0_plr_0_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 10);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
 
         PeerConnectionInterface::BitrateParameters bitrate_params;
         bitrate_params.min_bitrate_bps = 30000;
@@ -307,22 +296,23 @@ TEST_P(PCGenericDescriptorTest, ForemanCif30kbpsWithoutPacketLoss) {
 }
 
 // TODO(webrtc:9722): Remove when experiment is cleaned up.
-TEST_P(PCGenericDescriptorTest,
-       ForemanCif30kbpsWithoutPacketLossTrustedRateControl) {
+TEST(PCGenericDescriptorTest,
+     ForemanCif30kbpsWithoutPacketLossTrustedRateControl) {
   test::ScopedFieldTrials override_field_trials(
       AppendFieldTrials(kVp8TrustedRateControllerFieldTrial));
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
   auto fixture = CreateTestFixture(
-      GetTestName(
-          "pc_foreman_cif_30kbps_net_delay_0_0_plr_0_trusted_rate_ctrl"),
+      "pc_foreman_cif_30kbps_net_delay_0_0_plr_0_trusted_rate_ctrl_generic_"
+      "descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 10);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
 
         PeerConnectionInterface::BitrateParameters bitrate_params;
         bitrate_params.min_bitrate_bps = 30000;
@@ -349,9 +339,10 @@ TEST(PCFullStackTest, ForemanCifLink150kbpsWithoutPacketLoss) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -373,9 +364,10 @@ TEST(PCFullStackTest, ForemanCifLink130kbps100msDelay1PercentPacketLossUlpfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -397,9 +389,10 @@ TEST(PCFullStackTest, ForemanCifLink50kbps100msDelay1PercentPacketLossUlpfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -422,9 +415,10 @@ TEST(PCFullStackTest, ForemanCifLink150kbpsBadRateController) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -452,9 +446,10 @@ TEST(PCFullStackTest, ForemanCifMediaCapacitySmallLossAndQueue) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -465,20 +460,21 @@ TEST(PCFullStackTest, ForemanCifMediaCapacitySmallLossAndQueue) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCifPlr5) {
+TEST(PCGenericDescriptorTest, ForemanCifPlr5) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
   config.loss_percent = 5;
   config.queue_delay_ms = 50;
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_delay_50_0_plr_5"),
+      "pc_foreman_cif_delay_50_0_plr_5_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -488,20 +484,21 @@ TEST_P(PCGenericDescriptorTest, ForemanCifPlr5) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCifPlr5Ulpfec) {
+TEST(PCGenericDescriptorTest, ForemanCifPlr5Ulpfec) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
   config.loss_percent = 5;
   config.queue_delay_ms = 50;
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_delay_50_0_plr_5_ulpfec"),
+      "pc_foreman_cif_delay_50_0_plr_5_ulpfec_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -522,9 +519,10 @@ TEST(PCFullStackTest, ForemanCifPlr5Flexfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -546,9 +544,10 @@ TEST(PCFullStackTest, ForemanCif500kbpsPlr3Flexfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -570,9 +569,10 @@ TEST(PCFullStackTest, ForemanCif500kbpsPlr3Ulpfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -592,9 +592,10 @@ TEST(PCFullStackTest, ForemanCifWithoutPacketlossH264) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -613,9 +614,10 @@ TEST(PCFullStackTest, ForemanCif30kbpsWithoutPacketlossH264) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 10);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
 
         PeerConnectionInterface::BitrateParameters bitrate_params;
         bitrate_params.min_bitrate_bps = 30000;
@@ -631,20 +633,21 @@ TEST(PCFullStackTest, ForemanCif30kbpsWithoutPacketlossH264) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCifPlr5H264) {
+TEST(PCGenericDescriptorTest, ForemanCifPlr5H264) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
   config.loss_percent = 5;
   config.queue_delay_ms = 50;
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_delay_50_0_plr_5_H264"),
+      "pc_foreman_cif_delay_50_0_plr_5_H264_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -668,9 +671,10 @@ TEST(PCFullStackTest, ForemanCifPlr5H264SpsPpsIdrIsKeyframe) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -691,9 +695,10 @@ TEST(PCFullStackTest, ForemanCifPlr5H264Flexfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -716,9 +721,10 @@ TEST(PCFullStackTest, DISABLED_ForemanCifPlr5H264Ulpfec) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -741,9 +747,10 @@ TEST(PCFullStackTest, ForemanCif500kbps) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -765,9 +772,10 @@ TEST(PCFullStackTest, ForemanCif500kbpsLimitedQueue) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -789,9 +797,10 @@ TEST(PCFullStackTest, ForemanCif500kbps100ms) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -801,7 +810,7 @@ TEST(PCFullStackTest, ForemanCif500kbps100ms) {
   fixture->Run(std::move(run_params));
 }
 
-TEST_P(PCGenericDescriptorTest, ForemanCif500kbps100msLimitedQueue) {
+TEST(PCGenericDescriptorTest, ForemanCif500kbps100msLimitedQueue) {
   std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
       CreateNetworkEmulationManager();
   BuiltInNetworkBehaviorConfig config;
@@ -809,13 +818,14 @@ TEST_P(PCGenericDescriptorTest, ForemanCif500kbps100msLimitedQueue) {
   config.queue_delay_ms = 100;
   config.link_capacity_kbps = 500;
   auto fixture = CreateTestFixture(
-      GetTestName("pc_foreman_cif_500kbps_100ms_32pkts_queue"),
+      "pc_foreman_cif_500kbps_100ms_32pkts_queue_generic_descriptor",
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -858,9 +868,10 @@ TEST(PCFullStackTest, ForemanCif1000kbps100msLimitedQueue) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(352, 288, 30);
-        video.input_file_name = ClipNameToClipPath("foreman_cif");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("foreman_cif"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -883,10 +894,10 @@ TEST(PCFullStackTest, ConferenceMotionHd2000kbps100msLimitedQueue) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 50);
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -912,10 +923,10 @@ TEST(PCFullStackTest, ConferenceMotionHd1TLModerateLimitsWhitelistVp8) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 50);
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -927,7 +938,7 @@ TEST(PCFullStackTest, ConferenceMotionHd1TLModerateLimitsWhitelistVp8) {
 
 /*
 // TODO(bugs.webrtc.org/10639) requires simulcast/SVC support in PC framework
-TEST_P(PCGenericDescriptorTest, ConferenceMotionHd2TLModerateLimits) {
+TEST(PCGenericDescriptorTest, ConferenceMotionHd2TLModerateLimits) {
   auto fixture = CreateVideoQualityTestFixture();
   ParamsWithLogging conf_motion_hd;
   conf_motion_hd.call.send_side_bwe = true;
@@ -941,7 +952,7 @@ TEST_P(PCGenericDescriptorTest, ConferenceMotionHd2TLModerateLimits) {
       false,   false,
       false,   ClipNameToClipPath("ConferenceMotion_1280_720_50")};
   conf_motion_hd.analyzer = {
-      GetTestName("conference_motion_hd_2tl_moderate_limits"), 0.0, 0.0,
+      "conference_motion_hd_2tl_moderate_limits_generic_descriptor", 0.0, 0.0,
       kTestDurationSec};
   conf_motion_hd.config->queue_length_packets = 50;
   conf_motion_hd.config->loss_percent = 3;
@@ -1064,10 +1075,10 @@ TEST(PCFullStackTest, ConferenceMotionHd2000kbps100msLimitedQueueVP9) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 50);
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1089,9 +1100,11 @@ TEST(PCFullStackTest, ScreenshareSlidesVP8_2TL_NoConferenceMode) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(1850, 1110, 5);
-        video.screen_share_config = ScreenShareConfig(TimeDelta::Seconds(10));
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        video.content_hint = VideoTrackInterface::ContentHint::kText;
+        auto frame_generator = CreateScreenShareFrameGenerator(
+            video, ScreenShareConfig(TimeDelta::Seconds(10)));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1110,9 +1123,11 @@ TEST(PCFullStackTest, ScreenshareSlidesVP8_2TL) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(1850, 1110, 5);
-        video.screen_share_config = ScreenShareConfig(TimeDelta::Seconds(10));
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        video.content_hint = VideoTrackInterface::ContentHint::kText;
+        auto frame_generator = CreateScreenShareFrameGenerator(
+            video, ScreenShareConfig(TimeDelta::Seconds(10)));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1134,11 +1149,13 @@ TEST(PCFullStackTest, ScreenshareSlidesVP8_2TL_Simulcast_NoConferenceMode) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(1850, 1110, 30);
-        video.screen_share_config = ScreenShareConfig(TimeDelta::Seconds(10));
         video.simulcast_config = VideoSimulcastConfig(2, 1);
         video.temporal_layers_count = 2;
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        video.content_hint = VideoTrackInterface::ContentHint::kText;
+        auto frame_generator = CreateScreenShareFrameGenerator(
+            video, ScreenShareConfig(TimeDelta::Seconds(10)));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1157,11 +1174,13 @@ TEST(PCFullStackTest, ScreenshareSlidesVP8_2TL_Simulcast) {
                             BuiltInNetworkBehaviorConfig()),
       [](PeerConfigurer* alice) {
         VideoConfig video(1850, 1110, 30);
-        video.screen_share_config = ScreenShareConfig(TimeDelta::Seconds(10));
         video.simulcast_config = VideoSimulcastConfig(2, 1);
         video.temporal_layers_count = 2;
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        video.content_hint = VideoTrackInterface::ContentHint::kText;
+        auto frame_generator = CreateScreenShareFrameGenerator(
+            video, ScreenShareConfig(TimeDelta::Seconds(10)));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1258,7 +1277,7 @@ TEST(PCFullStackTest, ScreenshareSlidesVP8_2TL_Scroll) {
 }
 
 // TODO(bugs.webrtc.org/10639) requires simulcast/SVC support in PC framework
-TEST_P(PCGenericDescriptorTest, ScreenshareSlidesVP8_2TL_LossyNet) {
+TEST(PCGenericDescriptorTest, ScreenshareSlidesVP8_2TL_LossyNet) {
   auto fixture = CreateVideoQualityTestFixture();
   ParamsWithLogging screenshare;
   screenshare.call.send_side_bwe = true;
@@ -1266,12 +1285,12 @@ TEST_P(PCGenericDescriptorTest, ScreenshareSlidesVP8_2TL_LossyNet) {
                           1000000, false, "VP8", 2, 1,     400000,
                           false,   false, false, ""};
   screenshare.screenshare[0] = {true, false, 10};
-  screenshare.analyzer = {GetTestName("screenshare_slides_lossy_net"), 0.0, 0.0,
-                          kTestDurationSec};
+  screenshare.analyzer = {"screenshare_slides_lossy_net_generic_descriptor",
+                          0.0, 0.0, kTestDurationSec};
   screenshare.config->loss_percent = 5;
   screenshare.config->queue_delay_ms = 200;
   screenshare.config->link_capacity_kbps = 500;
-  screenshare.call.generic_descriptor = GenericDescriptorEnabled();
+  screenshare.call.generic_descriptor = true;
   fixture->RunWithAnalyzer(screenshare);
 }
 
@@ -1397,39 +1416,11 @@ TEST(PCFullStackTest, ScreenshareSlidesVP9_3SL_High_Fps) {
       [](PeerConfigurer* alice) {
         VideoConfig video(1850, 1110, 30);
         video.stream_label = "alice-video";
-        video.screen_share_config = ScreenShareConfig(TimeDelta::Seconds(10));
         video.simulcast_config = VideoSimulcastConfig(3, 2);
-        alice->AddVideoConfig(std::move(video));
-      },
-      [](PeerConfigurer* bob) {});
-  RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
-  run_params.video_codecs = {VideoCodecConfig(
-      /*name=*/cricket::kVp9CodecName, /*required_params=*/{
-          {kVP9FmtpProfileId, VP9ProfileToString(VP9Profile::kProfile0)}})};
-  run_params.use_flex_fec = false;
-  run_params.use_ulp_fec = false;
-  fixture->Run(std::move(run_params));
-}
-
-TEST(PCFullStackTest, ScreenshareSlidesVP9_3SL_Variable_Fps) {
-  webrtc::test::ScopedFieldTrials override_trials(
-      AppendFieldTrials("WebRTC-VP9VariableFramerateScreenshare/"
-                        "Enabled,min_qp:32,min_fps:5.0,undershoot:30,frames_"
-                        "before_steady_state:5/"
-                        "WebRTC-Vp9InterLayerPred/"
-                        "Enabled,inter_layer_pred_mode:on/"));
-  std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
-      CreateNetworkEmulationManager();
-  auto fixture = CreateTestFixture(
-      "pc_screenshare_slides_vp9_3sl_variable_fps",
-      CreateTwoNetworkLinks(network_emulation_manager.get(),
-                            BuiltInNetworkBehaviorConfig()),
-      [](PeerConfigurer* alice) {
-        VideoConfig video(1850, 1110, 30);
-        video.stream_label = "alice-video";
-        video.screen_share_config = ScreenShareConfig(TimeDelta::Seconds(10));
-        video.simulcast_config = VideoSimulcastConfig(3, 2);
-        alice->AddVideoConfig(std::move(video));
+        video.content_hint = VideoTrackInterface::ContentHint::kText;
+        auto frame_generator = CreateScreenShareFrameGenerator(
+            video, ScreenShareConfig(TimeDelta::Seconds(10)));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1454,40 +1445,11 @@ TEST(PCFullStackTest, VP9SVC_3SL_High) {
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 30);
         video.stream_label = "alice-video";
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.simulcast_config = VideoSimulcastConfig(3, 2);
         video.temporal_layers_count = 3;
-        alice->AddVideoConfig(std::move(video));
-      },
-      [](PeerConfigurer* bob) {});
-  RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
-  run_params.video_codecs = {VideoCodecConfig(
-      /*name=*/cricket::kVp9CodecName, /*required_params=*/{
-          {kVP9FmtpProfileId, VP9ProfileToString(VP9Profile::kProfile0)}})};
-  run_params.use_flex_fec = false;
-  run_params.use_ulp_fec = false;
-  fixture->Run(std::move(run_params));
-}
-
-TEST(PCFullStackTest, VP9SVC_3SL_Medium) {
-  webrtc::test::ScopedFieldTrials override_trials(
-      AppendFieldTrials("WebRTC-Vp9InterLayerPred/"
-                        "Enabled,inter_layer_pred_mode:on/"));
-  std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
-      CreateNetworkEmulationManager();
-  auto fixture = CreateTestFixture(
-      "pc_vp9svc_3sl_medium",
-      CreateTwoNetworkLinks(network_emulation_manager.get(),
-                            BuiltInNetworkBehaviorConfig()),
-      [](PeerConfigurer* alice) {
-        VideoConfig video(1280, 720, 30);
-        video.stream_label = "alice-video";
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
-        video.simulcast_config = VideoSimulcastConfig(3, 1);
-        video.temporal_layers_count = 3;
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1512,11 +1474,11 @@ TEST(PCFullStackTest, VP9SVC_3SL_Low) {
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 30);
         video.stream_label = "alice-video";
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.simulcast_config = VideoSimulcastConfig(3, 0);
         video.temporal_layers_count = 3;
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1641,7 +1603,6 @@ TEST(PCFullStackTest, MAYBE_SimulcastFullHdOveruse) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(1920, 1080, 30);
-        video.generator = VideoGeneratorType::kDefault;
         video.simulcast_config = VideoSimulcastConfig(3, 2);
         video.temporal_layers_count = 3;
         video.stream_label = "alice-video";
@@ -1666,36 +1627,11 @@ TEST(PCFullStackTest, SimulcastVP8_3SL_High) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 30);
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.simulcast_config = VideoSimulcastConfig(3, 2);
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
-      },
-      [](PeerConfigurer* bob) {});
-  RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
-  run_params.video_codecs = {VideoCodecConfig(cricket::kVp8CodecName)};
-  run_params.use_flex_fec = false;
-  run_params.use_ulp_fec = false;
-  fixture->Run(std::move(run_params));
-}
-
-TEST(PCFullStackTest, SimulcastVP8_3SL_Medium) {
-  std::unique_ptr<NetworkEmulationManager> network_emulation_manager =
-      CreateNetworkEmulationManager();
-  BuiltInNetworkBehaviorConfig config;
-  config.loss_percent = 0;
-  config.queue_delay_ms = 100;
-  auto fixture = CreateTestFixture(
-      "pc_simulcast_vp8_3sl_medium",
-      CreateTwoNetworkLinks(network_emulation_manager.get(), config),
-      [](PeerConfigurer* alice) {
-        VideoConfig video(1280, 720, 30);
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
-        video.simulcast_config = VideoSimulcastConfig(3, 1);
-        video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1716,11 +1652,11 @@ TEST(PCFullStackTest, SimulcastVP8_3SL_Low) {
       CreateTwoNetworkLinks(network_emulation_manager.get(), config),
       [](PeerConfigurer* alice) {
         VideoConfig video(1280, 720, 30);
-        video.input_file_name =
-            ClipNameToClipPath("ConferenceMotion_1280_720_50");
         video.simulcast_config = VideoSimulcastConfig(3, 0);
         video.stream_label = "alice-video";
-        alice->AddVideoConfig(std::move(video));
+        auto frame_generator = CreateFromYuvFileFrameGenerator(
+            video, ClipNameToClipPath("ConferenceMotion_1280_720_50"));
+        alice->AddVideoConfig(std::move(video), std::move(frame_generator));
       },
       [](PeerConfigurer* bob) {});
   RunParams run_params(TimeDelta::Seconds(kTestDurationSec));
@@ -1858,12 +1794,6 @@ TEST(PCFullStackTest, MAYBE_LargeRoomVP8_50thumb) {
   fixture->RunWithAnalyzer(large_room);
 }
 */
-
-INSTANTIATE_TEST_SUITE_P(
-    PCFullStackTest,
-    PCGenericDescriptorTest,
-    ::testing::Values("WebRTC-GenericDescriptor/Disabled/",
-                      "WebRTC-GenericDescriptor/Enabled/"));
 
 class PCDualStreamsTest : public ::testing::TestWithParam<int> {};
 

@@ -184,6 +184,10 @@ const char* DtlsTransportStateToRTCDtlsTransportState(
 const char* NetworkAdapterTypeToStatsType(rtc::AdapterType type) {
   switch (type) {
     case rtc::ADAPTER_TYPE_CELLULAR:
+    case rtc::ADAPTER_TYPE_CELLULAR_2G:
+    case rtc::ADAPTER_TYPE_CELLULAR_3G:
+    case rtc::ADAPTER_TYPE_CELLULAR_4G:
+    case rtc::ADAPTER_TYPE_CELLULAR_5G:
       return RTCNetworkType::kCellular;
     case rtc::ADAPTER_TYPE_ETHERNET:
       return RTCNetworkType::kEthernet;
@@ -417,6 +421,19 @@ void SetOutboundRTPStreamStatsFromVideoSenderInfo(
       rtc::kNumMillisecsPerSec;
   outbound_video->total_encoded_bytes_target =
       video_sender_info.total_encoded_bytes_target;
+  if (video_sender_info.send_frame_width > 0) {
+    outbound_video->frame_width =
+        static_cast<uint32_t>(video_sender_info.send_frame_width);
+  }
+  if (video_sender_info.send_frame_height > 0) {
+    outbound_video->frame_height =
+        static_cast<uint32_t>(video_sender_info.send_frame_height);
+  }
+  if (video_sender_info.framerate_sent > 0) {
+    outbound_video->frames_per_second = video_sender_info.framerate_sent;
+  }
+  outbound_video->frames_sent = video_sender_info.frames_sent;
+  outbound_video->huge_frames_sent = video_sender_info.huge_frames_sent;
   outbound_video->total_packet_send_delay =
       static_cast<double>(video_sender_info.total_packet_send_delay_ms) /
       rtc::kNumMillisecsPerSec;
@@ -432,6 +449,9 @@ void SetOutboundRTPStreamStatsFromVideoSenderInfo(
   if (!video_sender_info.encoder_implementation_name.empty()) {
     outbound_video->encoder_implementation =
         video_sender_info.encoder_implementation_name;
+  }
+  if (video_sender_info.rid) {
+    outbound_video->rid = *video_sender_info.rid;
   }
 }
 
@@ -648,6 +668,8 @@ ProduceMediaStreamTrackStatsFromVoiceReceiverInfo(
       voice_receiver_info.delayed_packet_outage_samples;
   audio_track_stats->relative_packet_arrival_delay =
       voice_receiver_info.relative_packet_arrival_delay_seconds;
+  audio_track_stats->jitter_buffer_target_delay =
+      voice_receiver_info.jitter_buffer_target_delay_seconds;
   audio_track_stats->interruption_count =
       voice_receiver_info.interruption_count >= 0
           ? voice_receiver_info.interruption_count
@@ -1253,22 +1275,21 @@ void RTCStatsCollector::ProduceCodecStats_n(
 void RTCStatsCollector::ProduceDataChannelStats_s(
     int64_t timestamp_us,
     RTCStatsReport* report) const {
-  RTC_DCHECK(signaling_thread_->IsCurrent());
-  for (const rtc::scoped_refptr<DataChannel>& data_channel :
-       pc_->sctp_data_channels()) {
+  RTC_DCHECK_RUN_ON(signaling_thread_);
+  std::vector<DataChannel::Stats> data_stats = pc_->GetDataChannelStats();
+  for (const auto& stats : data_stats) {
     std::unique_ptr<RTCDataChannelStats> data_channel_stats(
         new RTCDataChannelStats(
-            "RTCDataChannel_" + rtc::ToString(data_channel->internal_id()),
+            "RTCDataChannel_" + rtc::ToString(stats.internal_id),
             timestamp_us));
-    data_channel_stats->label = data_channel->label();
-    data_channel_stats->protocol = data_channel->protocol();
-    data_channel_stats->datachannelid = data_channel->id();
-    data_channel_stats->state =
-        DataStateToRTCDataChannelState(data_channel->state());
-    data_channel_stats->messages_sent = data_channel->messages_sent();
-    data_channel_stats->bytes_sent = data_channel->bytes_sent();
-    data_channel_stats->messages_received = data_channel->messages_received();
-    data_channel_stats->bytes_received = data_channel->bytes_received();
+    data_channel_stats->label = std::move(stats.label);
+    data_channel_stats->protocol = std::move(stats.protocol);
+    data_channel_stats->data_channel_identifier = stats.id;
+    data_channel_stats->state = DataStateToRTCDataChannelState(stats.state);
+    data_channel_stats->messages_sent = stats.messages_sent;
+    data_channel_stats->bytes_sent = stats.bytes_sent;
+    data_channel_stats->messages_received = stats.messages_received;
+    data_channel_stats->bytes_received = stats.bytes_received;
     report->AddStats(std::move(data_channel_stats));
   }
 }

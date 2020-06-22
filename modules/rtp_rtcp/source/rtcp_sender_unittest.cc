@@ -18,7 +18,7 @@
 #include "modules/rtp_rtcp/source/rtcp_packet/bye.h"
 #include "modules/rtp_rtcp/source/rtcp_packet/common_header.h"
 #include "modules/rtp_rtcp/source/rtp_packet_received.h"
-#include "modules/rtp_rtcp/source/rtp_rtcp_impl.h"
+#include "modules/rtp_rtcp/source/rtp_rtcp_impl2.h"
 #include "modules/rtp_rtcp/source/time_util.h"
 #include "rtc_base/rate_limiter.h"
 #include "test/gmock.h"
@@ -76,8 +76,8 @@ class RtcpSenderTest : public ::testing::Test {
       : clock_(1335900000),
         receive_statistics_(ReceiveStatistics::Create(&clock_)),
         retransmission_rate_limiter_(&clock_, 1000) {
-    RtpRtcp::Configuration configuration = GetDefaultConfig();
-    rtp_rtcp_impl_.reset(new ModuleRtpRtcpImpl(configuration));
+    RtpRtcpInterface::Configuration configuration = GetDefaultConfig();
+    rtp_rtcp_impl_.reset(new ModuleRtpRtcpImpl2(configuration));
     rtcp_sender_.reset(new RTCPSender(configuration));
     rtcp_sender_->SetRemoteSSRC(kRemoteSsrc);
     rtcp_sender_->SetTimestampOffset(kStartRtpTimestamp);
@@ -85,8 +85,8 @@ class RtcpSenderTest : public ::testing::Test {
                                  /*payload_type=*/0);
   }
 
-  RtpRtcp::Configuration GetDefaultConfig() {
-    RtpRtcp::Configuration configuration;
+  RtpRtcpInterface::Configuration GetDefaultConfig() {
+    RtpRtcpInterface::Configuration configuration;
     configuration.audio = false;
     configuration.clock = &clock_;
     configuration.outgoing_transport = &test_transport_;
@@ -115,7 +115,7 @@ class RtcpSenderTest : public ::testing::Test {
   SimulatedClock clock_;
   TestTransport test_transport_;
   std::unique_ptr<ReceiveStatistics> receive_statistics_;
-  std::unique_ptr<ModuleRtpRtcpImpl> rtp_rtcp_impl_;
+  std::unique_ptr<ModuleRtpRtcpImpl2> rtp_rtcp_impl_;
   std::unique_ptr<RTCPSender> rtcp_sender_;
   RateLimiter retransmission_rate_limiter_;
 };
@@ -191,7 +191,7 @@ TEST_F(RtcpSenderTest, SendConsecutiveSrWithExactSlope) {
 }
 
 TEST_F(RtcpSenderTest, DoNotSendSrBeforeRtp) {
-  RtpRtcp::Configuration config;
+  RtpRtcpInterface::Configuration config;
   config.clock = &clock_;
   config.receive_statistics = receive_statistics_.get();
   config.outgoing_transport = &test_transport_;
@@ -213,7 +213,7 @@ TEST_F(RtcpSenderTest, DoNotSendSrBeforeRtp) {
 }
 
 TEST_F(RtcpSenderTest, DoNotSendCompundBeforeRtp) {
-  RtpRtcp::Configuration config;
+  RtpRtcpInterface::Configuration config;
   config.clock = &clock_;
   config.receive_statistics = receive_statistics_.get();
   config.outgoing_transport = &test_transport_;
@@ -315,47 +315,6 @@ TEST_F(RtcpSenderTest, StopSendingTriggersBye) {
   EXPECT_EQ(kSenderSsrc, parser()->bye()->sender_ssrc());
 }
 
-TEST_F(RtcpSenderTest, SendApp) {
-  const uint8_t kSubType = 30;
-  uint32_t name = 'n' << 24;
-  name += 'a' << 16;
-  name += 'm' << 8;
-  name += 'e';
-  const uint8_t kData[] = {'t', 'e', 's', 't', 'd', 'a', 't', 'a'};
-  EXPECT_EQ(0, rtcp_sender_->SetApplicationSpecificData(kSubType, name, kData,
-                                                        sizeof(kData)));
-  rtcp_sender_->SetRTCPStatus(RtcpMode::kReducedSize);
-  EXPECT_EQ(0, rtcp_sender_->SendRTCP(feedback_state(), kRtcpApp));
-  EXPECT_EQ(1, parser()->app()->num_packets());
-  EXPECT_EQ(kSubType, parser()->app()->sub_type());
-  EXPECT_EQ(name, parser()->app()->name());
-  EXPECT_EQ(sizeof(kData), parser()->app()->data_size());
-  EXPECT_EQ(0, memcmp(kData, parser()->app()->data(), sizeof(kData)));
-}
-
-TEST_F(RtcpSenderTest, SendEmptyApp) {
-  const uint8_t kSubType = 30;
-  const uint32_t kName = 0x6E616D65;
-
-  EXPECT_EQ(
-      0, rtcp_sender_->SetApplicationSpecificData(kSubType, kName, nullptr, 0));
-
-  rtcp_sender_->SetRTCPStatus(RtcpMode::kReducedSize);
-  EXPECT_EQ(0, rtcp_sender_->SendRTCP(feedback_state(), kRtcpApp));
-  EXPECT_EQ(1, parser()->app()->num_packets());
-  EXPECT_EQ(kSubType, parser()->app()->sub_type());
-  EXPECT_EQ(kName, parser()->app()->name());
-  EXPECT_EQ(0U, parser()->app()->data_size());
-}
-
-TEST_F(RtcpSenderTest, SetInvalidApplicationSpecificData) {
-  const uint8_t kData[] = {'t', 'e', 's', 't', 'd', 'a', 't'};
-  const uint16_t kInvalidDataLength = sizeof(kData) / sizeof(kData[0]);
-  EXPECT_EQ(-1,
-            rtcp_sender_->SetApplicationSpecificData(
-                0, 0, kData, kInvalidDataLength));  // Should by multiple of 4.
-}
-
 TEST_F(RtcpSenderTest, SendFir) {
   rtcp_sender_->SetRTCPStatus(RtcpMode::kReducedSize);
   EXPECT_EQ(0, rtcp_sender_->SendRTCP(feedback_state(), kRtcpFir));
@@ -445,7 +404,7 @@ TEST_F(RtcpSenderTest, RembNotIncludedBeforeSet) {
 }
 
 TEST_F(RtcpSenderTest, RembNotIncludedAfterUnset) {
-  const uint64_t kBitrate = 261011;
+  const int64_t kBitrate = 261011;
   const std::vector<uint32_t> kSsrcs = {kRemoteSsrc, kRemoteSsrc + 1};
   rtcp_sender_->SetRTCPStatus(RtcpMode::kReducedSize);
   rtcp_sender_->SetRemb(kBitrate, kSsrcs);
@@ -461,7 +420,7 @@ TEST_F(RtcpSenderTest, RembNotIncludedAfterUnset) {
 }
 
 TEST_F(RtcpSenderTest, SendRemb) {
-  const uint64_t kBitrate = 261011;
+  const int64_t kBitrate = 261011;
   const std::vector<uint32_t> kSsrcs = {kRemoteSsrc, kRemoteSsrc + 1};
   rtcp_sender_->SetRTCPStatus(RtcpMode::kReducedSize);
   rtcp_sender_->SetRemb(kBitrate, kSsrcs);
@@ -563,7 +522,7 @@ TEST_F(RtcpSenderTest, TestNoXrRrtrSentIfNotEnabled) {
 
 TEST_F(RtcpSenderTest, TestRegisterRtcpPacketTypeObserver) {
   RtcpPacketTypeCounterObserverImpl observer;
-  RtpRtcp::Configuration config;
+  RtpRtcpInterface::Configuration config;
   config.clock = &clock_;
   config.receive_statistics = receive_statistics_.get();
   config.outgoing_transport = &test_transport_;
@@ -691,7 +650,7 @@ TEST_F(RtcpSenderTest, ByeMustBeLast) {
       }));
 
   // Re-configure rtcp_sender_ with mock_transport_
-  RtpRtcp::Configuration config;
+  RtpRtcpInterface::Configuration config;
   config.clock = &clock_;
   config.receive_statistics = receive_statistics_.get();
   config.outgoing_transport = &mock_transport;

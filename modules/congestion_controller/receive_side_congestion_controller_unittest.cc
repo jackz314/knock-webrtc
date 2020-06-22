@@ -37,8 +37,10 @@ uint32_t AbsSendTime(int64_t t, int64_t denom) {
 
 class MockPacketRouter : public PacketRouter {
  public:
-  MOCK_METHOD2(OnReceiveBitrateChanged,
-               void(const std::vector<uint32_t>& ssrcs, uint32_t bitrate));
+  MOCK_METHOD(void,
+              OnReceiveBitrateChanged,
+              (const std::vector<uint32_t>& ssrcs, uint32_t bitrate),
+              (override));
 };
 
 const uint32_t kInitialBitrateBps = 60000;
@@ -76,10 +78,10 @@ TEST(ReceiveSideCongestionControllerTest, OnReceivedPacketWithAbsSendTime) {
 TEST(ReceiveSideCongestionControllerTest, ConvergesToCapacity) {
   Scenario s("recieve_cc_unit/converge");
   NetworkSimulationConfig net_conf;
-  net_conf.bandwidth = DataRate::kbps(1000);
+  net_conf.bandwidth = DataRate::KilobitsPerSec(1000);
   net_conf.delay = TimeDelta::Millis(50);
   auto* client = s.CreateClient("send", [&](CallClientConfig* c) {
-    c->transport.rates.start_rate = DataRate::kbps(300);
+    c->transport.rates.start_rate = DataRate::KilobitsPerSec(300);
   });
 
   auto* route = s.CreateRoutes(client, {s.CreateSimulationNode(net_conf)},
@@ -95,10 +97,10 @@ TEST(ReceiveSideCongestionControllerTest, ConvergesToCapacity) {
 TEST(ReceiveSideCongestionControllerTest, IsFairToTCP) {
   Scenario s("recieve_cc_unit/tcp_fairness");
   NetworkSimulationConfig net_conf;
-  net_conf.bandwidth = DataRate::kbps(1000);
+  net_conf.bandwidth = DataRate::KilobitsPerSec(1000);
   net_conf.delay = TimeDelta::Millis(50);
   auto* client = s.CreateClient("send", [&](CallClientConfig* c) {
-    c->transport.rates.start_rate = DataRate::kbps(1000);
+    c->transport.rates.start_rate = DataRate::KilobitsPerSec(1000);
   });
   auto send_net = {s.CreateSimulationNode(net_conf)};
   auto ret_net = {s.CreateSimulationNode(net_conf)};

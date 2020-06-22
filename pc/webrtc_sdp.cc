@@ -230,9 +230,6 @@ static const char kApplicationSpecificMaximum[] = "AS";
 static const char kDefaultSctpmapProtocol[] = "webrtc-datachannel";
 
 // This is a non-standardized setting for plugin transports.
-static const char kOpaqueTransportParametersLine[] = "x-opaque";
-
-// This is a non-standardized setting for plugin transports.
 static const char kAltProtocolLine[] = "x-alt-protocol";
 
 // RTP payload type is in the 0-127 range. Use -1 to indicate "all" payload
@@ -523,17 +520,6 @@ static void InitAttrLine(const std::string& attribute, rtc::StringBuilder* os) {
   InitLine(kLineTypeAttributes, attribute, os);
 }
 
-// Adds an x-otp SDP attribute line based on opaque transport parameters.
-static void AddOpaqueTransportLine(
-    const cricket::OpaqueTransportParameters params,
-    std::string* message) {
-  rtc::StringBuilder os;
-  InitAttrLine(kOpaqueTransportParametersLine, &os);
-  os << kSdpDelimiterColon << params.protocol << kSdpDelimiterColon
-     << rtc::Base64::Encode(params.parameters);
-  AddLine(os.str(), message);
-}
-
 static void AddAltProtocolLine(const std::string& protocol,
                                std::string* message) {
   rtc::StringBuilder os;
@@ -686,10 +672,12 @@ void CreateTracksFromSsrcInfos(const SsrcInfoVec& ssrc_infos,
                                int msid_signaling) {
   RTC_DCHECK(tracks != NULL);
   for (const SsrcInfo& ssrc_info : ssrc_infos) {
+    // According to https://tools.ietf.org/html/rfc5576#section-6.1, the CNAME
+    // attribute is mandatory, but we relax that restriction.
     if (ssrc_info.cname.empty()) {
-      continue;
+      RTC_LOG(LS_WARNING) << "CNAME attribute missing for SSRC "
+                          << ssrc_info.ssrc_id;
     }
-
     std::vector<std::string> stream_ids;
     std::string track_id;
     if (msid_signaling & cricket::kMsidSignalingMediaSection) {
@@ -1109,11 +1097,14 @@ bool ParseCandidate(const std::string& message,
   if (!StringToProto(transport.c_str(), &protocol)) {
     return ParseFailed(first_line, "Unsupported transport type.", error);
   }
+  bool tcp_protocol = false;
   switch (protocol) {
+    // Supported protocols.
     case cricket::PROTO_UDP:
+      break;
     case cricket::PROTO_TCP:
     case cricket::PROTO_SSLTCP:
-      // Supported protocol.
+      tcp_protocol = true;
       break;
     default:
       return ParseFailed(first_line, "Unsupported transport type.", error);
@@ -1170,9 +1161,14 @@ bool ParseCandidate(const std::string& message,
       return ParseFailed(first_line, "Invalid TCP candidate type.", error);
     }
 
-    if (protocol != cricket::PROTO_TCP) {
+    if (!tcp_protocol) {
       return ParseFailed(first_line, "Invalid non-TCP candidate", error);
     }
+  } else if (tcp_protocol) {
+    // We allow the tcptype to be missing, for backwards compatibility,
+    // treating it as a passive candidate.
+    // TODO(bugs.webrtc.org/11466): Treat a missing tcptype as an error?
+    tcptype = cricket::TCPTYPE_PASSIVE_STR;
   }
 
   // Extension
@@ -1522,11 +1518,6 @@ void BuildMediaDescription(const ContentInfo* content_info,
         AddLine(os.str(), message);
       }
     }
-
-    if (transport_info->description.opaque_parameters) {
-      AddOpaqueTransportLine(*transport_info->description.opaque_parameters,
-                             message);
-    }
   }
 
   if (media_desc->alt_protocol()) {
@@ -1594,7 +1585,12 @@ void BuildRtpContentAttributes(const MediaContentDescription* media_desc,
       InitAttrLine(kAttributeRecvOnly, &os);
       break;
     case RtpTransceiverDirection::kSendRecv:
+      InitAttrLine(kAttributeSendRecv, &os);
+      break;
+    case RtpTransceiverDirection::kStopped:
     default:
+      // kStopped shouldn't be used in signalling.
+      RTC_NOTREACHED();
       InitAttrLine(kAttributeSendRecv, &os);
       break;
   }
@@ -2000,7 +1996,11 @@ void BuildCandidate(const std::vector<Candidate>& candidates,
          << candidate.related_address().PortAsString() << " ";
     }
 
-    if (candidate.protocol() == cricket::TCP_PROTOCOL_NAME) {
+    // Note that we allow the tcptype to be missing, for backwards
+    // compatibility; the implementation treats this as a passive candidate.
+    // TODO(bugs.webrtc.org/11466): Treat a missing tcptype as an error?
+    if (candidate.protocol() == cricket::TCP_PROTOCOL_NAME &&
+        !candidate.tcptype().empty()) {
       os << kTcpCandidateType << " " << candidate.tcptype() << " ";
     }
 
@@ -2082,26 +2082,6 @@ bool ParseConnectionData(const std::string& line,
         line,
         "Failed to parse the connection data. The address type is mismatching.",
         error);
-  }
-  return true;
-}
-
-bool ParseOpaqueTransportLine(const std::string& line,
-                              std::string* protocol,
-                              std::string* transport_parameters,
-                              SdpParseError* error) {
-  std::string value;
-  if (!GetValue(line, kOpaqueTransportParametersLine, &value, error)) {
-    return false;
-  }
-  std::string tmp_parameters;
-  if (!rtc::tokenize_first(value, kSdpDelimiterColonChar, protocol,
-                           &tmp_parameters)) {
-    return ParseFailedGetValue(line, kOpaqueTransportParametersLine, error);
-  }
-  if (!rtc::Base64::Decode(tmp_parameters, rtc::Base64::DO_STRICT,
-                           transport_parameters, nullptr)) {
-    return ParseFailedGetValue(line, kOpaqueTransportParametersLine, error);
   }
   return true;
 }
@@ -3116,13 +3096,6 @@ bool ParseContent(const std::string& message,
       }
     } else if (HasAttribute(line, kAttributeIceOption)) {
       if (!ParseIceOptions(line, &transport->transport_options, error)) {
-        return false;
-      }
-    } else if (HasAttribute(line, kOpaqueTransportParametersLine)) {
-      transport->opaque_parameters = cricket::OpaqueTransportParameters();
-      if (!ParseOpaqueTransportLine(
-              line, &transport->opaque_parameters->protocol,
-              &transport->opaque_parameters->parameters, error)) {
         return false;
       }
     } else if (HasAttribute(line, kAltProtocolLine)) {

@@ -28,6 +28,7 @@ rtc_library("webrtc_fuzzer_main") {
 }
 
 rtc_library("fuzz_data_helper") {
+  testonly = true
   sources = [
     "fuzz_data_helper.cc",
     "fuzz_data_helper.h",
@@ -148,6 +149,7 @@ webrtc_fuzzer_test("ulpfec_generator_fuzzer") {
     "../../modules/rtp_rtcp:rtp_rtcp_format",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
+    "../../system_wrappers",
   ]
 }
 
@@ -228,6 +230,7 @@ webrtc_fuzzer_test("congestion_controller_feedback_fuzzer") {
 }
 
 rtc_library("audio_decoder_fuzzer") {
+  testonly = true
   sources = [
     "audio_decoder_fuzzer.cc",
     "audio_decoder_fuzzer.h",
@@ -237,8 +240,8 @@ rtc_library("audio_decoder_fuzzer") {
     "../../modules/rtp_rtcp:rtp_rtcp_format",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
-    "//third_party/abseil-cpp/absl/types:optional",
   ]
+  absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
 }
 
 webrtc_fuzzer_test("audio_decoder_ilbc_fuzzer") {
@@ -290,13 +293,45 @@ webrtc_fuzzer_test("audio_decoder_multiopus_fuzzer") {
   ]
 }
 
+rtc_library("audio_encoder_fuzzer") {
+  testonly = true
+  sources = [
+    "audio_encoder_fuzzer.cc",
+    "audio_encoder_fuzzer.h",
+  ]
+  deps = [
+    ":fuzz_data_helper",
+    "../../api:array_view",
+    "../../api/audio_codecs:audio_codecs_api",
+    "../../rtc_base:checks",
+    "../../rtc_base:rtc_base_approved",
+  ]
+}
+
 webrtc_fuzzer_test("audio_encoder_opus_fuzzer") {
   sources = [ "audio_encoder_opus_fuzzer.cc" ]
   deps = [
-    "../../api:array_view",
+    ":audio_encoder_fuzzer",
     "../../api/audio_codecs/opus:audio_encoder_opus",
     "../../rtc_base:checks",
-    "../../rtc_base:rtc_base_approved",
+  ]
+}
+
+webrtc_fuzzer_test("audio_encoder_isac_fixed_fuzzer") {
+  sources = [ "audio_encoder_isac_fixed_fuzzer.cc" ]
+  deps = [
+    ":audio_encoder_fuzzer",
+    "../../api/audio_codecs/isac:audio_encoder_isac_fix",
+    "../../rtc_base:checks",
+  ]
+}
+
+webrtc_fuzzer_test("audio_encoder_isac_float_fuzzer") {
+  sources = [ "audio_encoder_isac_float_fuzzer.cc" ]
+  deps = [
+    ":audio_encoder_fuzzer",
+    "../../api/audio_codecs/isac:audio_encoder_isac_float",
+    "../../rtc_base:checks",
   ]
 }
 
@@ -338,7 +373,7 @@ webrtc_fuzzer_test("neteq_signal_fuzzer") {
 webrtc_fuzzer_test("residual_echo_detector_fuzzer") {
   sources = [ "residual_echo_detector_fuzzer.cc" ]
   deps = [
-    "../../modules/audio_processing",
+    "../../api/audio:echo_detector_creator",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
   ]
@@ -391,6 +426,7 @@ webrtc_fuzzer_test("pseudotcp_parser_fuzzer") {
 }
 
 rtc_library("audio_processing_fuzzer_helper") {
+  testonly = true
   sources = [
     "audio_processing_fuzzer_helper.cc",
     "audio_processing_fuzzer_helper.h",
@@ -400,10 +436,11 @@ rtc_library("audio_processing_fuzzer_helper") {
     "../../api/audio:audio_frame_api",
     "../../modules/audio_processing",
     "../../modules/audio_processing:api",
+    "../../modules/audio_processing:audio_frame_proxies",
     "../../rtc_base:checks",
     "../../rtc_base:rtc_base_approved",
-    "//third_party/abseil-cpp/absl/types:optional",
   ]
+  absl_deps = [ "//third_party/abseil-cpp/absl/types:optional" ]
 }
 
 webrtc_fuzzer_test("audio_processing_fuzzer") {
@@ -416,6 +453,7 @@ webrtc_fuzzer_test("audio_processing_fuzzer") {
     "../../modules/audio_processing",
     "../../modules/audio_processing:api",
     "../../modules/audio_processing:audio_buffer",
+    "../../modules/audio_processing:audioproc_test_utils",
     "../../modules/audio_processing/aec3",
     "../../modules/audio_processing/aec_dump",
     "../../modules/audio_processing/aec_dump:aec_dump_impl",

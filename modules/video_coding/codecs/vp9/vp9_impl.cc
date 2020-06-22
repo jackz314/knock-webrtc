@@ -25,6 +25,7 @@
 #include "common_video/libyuv/include/webrtc_libyuv.h"
 #include "modules/rtp_rtcp/include/rtp_rtcp_defines.h"
 #include "modules/video_coding/codecs/vp9/svc_rate_allocator.h"
+#include "modules/video_coding/utility/vp9_uncompressed_header_parser.h"
 #include "rtc_base/checks.h"
 #include "rtc_base/experiments/rate_control_settings.h"
 #include "rtc_base/keep_ref_until_done.h"
@@ -45,13 +46,20 @@ namespace {
 uint8_t kRefBufIdx[4] = {0, 0, 0, 1};
 uint8_t kUpdBufIdx[4] = {0, 0, 1, 0};
 
-int kMaxNumTiles4kVideo = 8;
-
 // Maximum allowed PID difference for differnet per-layer frame-rate case.
 const int kMaxAllowedPidDiff = 30;
 
 constexpr double kLowRateFactor = 1.0;
 constexpr double kHighRateFactor = 2.0;
+
+// TODO(ilink): Tune these thresholds further.
+// Selected using ConverenceMotion_1280_720_50.yuv clip.
+// No toggling observed on any link capacity from 100-2000kbps.
+// HD was reached consistently when link capacity was 1500kbps.
+// Set resolutions are a bit more conservative than svc_config.cc sets, e.g.
+// for 300kbps resolution converged to 270p instead of 360p.
+constexpr int kLowVp9QpThreshold = 149;
+constexpr int kHighVp9QpThreshold = 205;
 
 // These settings correspond to the settings in vpx_codec_enc_cfg.
 struct Vp9RateSettings {
@@ -249,7 +257,10 @@ VP9EncoderImpl::VP9EncoderImpl(const cricket::VideoCodec& codec)
           "WebRTC-VP9VariableFramerateScreenshare")),
       variable_framerate_controller_(
           variable_framerate_experiment_.framerate_limit),
-      num_steady_state_frames_(0) {
+      quality_scaler_experiment_(
+          ParseQualityScalerConfig("WebRTC-VP9QualityScaler")),
+      num_steady_state_frames_(0),
+      config_changed_(true) {
   codec_ = {};
   memset(&svc_params_, 0, sizeof(vpx_svc_extra_cfg_t));
 }
@@ -398,7 +409,6 @@ bool VP9EncoderImpl::SetSvcRates(
       expect_no_more_active_layers = seen_active_layer;
     }
   }
-  RTC_DCHECK_GT(num_active_spatial_layers_, 0);
 
   if (higher_layers_enabled && !force_key_frame_) {
     // Prohibit drop of all layers for the next frame, so newly enabled
@@ -410,6 +420,7 @@ bool VP9EncoderImpl::SetSvcRates(
   }
 
   current_bitrate_allocation_ = bitrate_allocation;
+  config_changed_ = true;
   return true;
 }
 
@@ -439,6 +450,7 @@ void VP9EncoderImpl::SetRates(const RateControlParameters& parameters) {
 
   bool res = SetSvcRates(parameters.bitrate);
   RTC_DCHECK(res) << "Failed to set new bitrate allocation";
+  config_changed_ = true;
 }
 
 // TODO(eladalon): s/inst/codec_settings/g.
@@ -514,6 +526,11 @@ int VP9EncoderImpl::InitEncode(const VideoCodec* inst,
       config_->g_profile = 0;
       config_->g_input_bit_depth = 8;
       break;
+    case VP9Profile::kProfile1:
+      // Encoding of profile 1 is not implemented. It would require extended
+      // support for I444, I422, and I440 buffers.
+      RTC_NOTREACHED();
+      break;
     case VP9Profile::kProfile2:
       img_fmt = VPX_IMG_FMT_I42016;
       bits_for_storage = 16;
@@ -559,7 +576,13 @@ int VP9EncoderImpl::InitEncode(const VideoCodec* inst,
   // put some key-frames at will even in VPX_KF_DISABLED kf_mode.
   config_->kf_max_dist = inst->VP9().keyFrameInterval;
   config_->kf_min_dist = config_->kf_max_dist;
-  config_->rc_resize_allowed = inst->VP9().automaticResizeOn ? 1 : 0;
+  if (quality_scaler_experiment_.enabled) {
+    // In that experiment webrtc wide quality scaler is used instead of libvpx
+    // internal scaler.
+    config_->rc_resize_allowed = 0;
+  } else {
+    config_->rc_resize_allowed = inst->VP9().automaticResizeOn ? 1 : 0;
+  }
   // Determine number of threads based on the image size and #cores.
   config_->g_threads =
       NumberOfThreads(config_->g_w, config_->g_h, settings.number_of_cores);
@@ -579,10 +602,11 @@ int VP9EncoderImpl::InitEncode(const VideoCodec* inst,
 
   // External reference control is required for different frame rate on spatial
   // layers because libvpx generates rtp incompatible references in this case.
-  external_ref_control_ = field_trial::IsEnabled("WebRTC-Vp9ExternalRefCtrl") ||
-                          (num_spatial_layers_ > 1 &&
-                           codec_.mode == VideoCodecMode::kScreensharing) ||
-                          inter_layer_pred_ == InterLayerPredMode::kOn;
+  external_ref_control_ =
+      !field_trial::IsDisabled("WebRTC-Vp9ExternalRefCtrl") ||
+      (num_spatial_layers_ > 1 &&
+       codec_.mode == VideoCodecMode::kScreensharing) ||
+      inter_layer_pred_ == InterLayerPredMode::kOn;
 
   if (num_temporal_layers_ == 1) {
     gof_.SetGofInfoVP9(kTemporalStructureMode1);
@@ -814,6 +838,7 @@ int VP9EncoderImpl::InitAndSetControlSettings(const VideoCodec* inst) {
   // Enable encoder skip of static/low content blocks.
   vpx_codec_control(encoder_, VP8E_SET_STATIC_THRESHOLD, 1);
   inited_ = true;
+  config_changed_ = true;
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -917,7 +942,10 @@ int VP9EncoderImpl::Encode(const VideoFrame& input_image,
     }
   }
 
-  for (int sl_idx = 0; sl_idx < num_active_spatial_layers_; ++sl_idx) {
+  // Need to set temporal layer id on ALL layers, even disabled ones.
+  // Otherwise libvpx might produce frames on a disabled layer:
+  // http://crbug.com/1051476
+  for (int sl_idx = 0; sl_idx < num_spatial_layers_; ++sl_idx) {
     layer_id.temporal_layer_id_per_spatial[sl_idx] = layer_id.temporal_layer_id;
   }
 
@@ -933,8 +961,11 @@ int VP9EncoderImpl::Encode(const VideoFrame& input_image,
                       &svc_drop_frame_);
   }
 
-  if (vpx_codec_enc_config_set(encoder_, config_)) {
-    return WEBRTC_VIDEO_CODEC_ERROR;
+  if (config_changed_) {
+    if (vpx_codec_enc_config_set(encoder_, config_)) {
+      return WEBRTC_VIDEO_CODEC_ERROR;
+    }
+    config_changed_ = false;
   }
 
   RTC_DCHECK_EQ(input_image.width(), raw_->d_w);
@@ -961,6 +992,10 @@ int VP9EncoderImpl::Encode(const VideoFrame& input_image,
       raw_->stride[VPX_PLANE_Y] = i420_buffer->StrideY();
       raw_->stride[VPX_PLANE_U] = i420_buffer->StrideU();
       raw_->stride[VPX_PLANE_V] = i420_buffer->StrideV();
+      break;
+    }
+    case VP9Profile::kProfile1: {
+      RTC_NOTREACHED();
       break;
     }
     case VP9Profile::kProfile2: {
@@ -1536,24 +1571,42 @@ VideoEncoder::EncoderInfo VP9EncoderImpl::GetEncoderInfo() const {
   EncoderInfo info;
   info.supports_native_handle = false;
   info.implementation_name = "libvpx";
-  info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
+  if (quality_scaler_experiment_.enabled) {
+    info.scaling_settings = VideoEncoder::ScalingSettings(
+        quality_scaler_experiment_.low_qp, quality_scaler_experiment_.high_qp);
+  } else {
+    info.scaling_settings = VideoEncoder::ScalingSettings::kOff;
+  }
   info.has_trusted_rate_controller = trusted_rate_controller_;
   info.is_hardware_accelerated = false;
   info.has_internal_source = false;
-  for (size_t si = 0; si < num_spatial_layers_; ++si) {
-    info.fps_allocation[si].clear();
-    if (!codec_.spatialLayers[si].active) {
-      continue;
+  if (inited_) {
+    // Find the max configured fps of any active spatial layer.
+    float max_fps = 0.0;
+    for (size_t si = 0; si < num_spatial_layers_; ++si) {
+      if (codec_.spatialLayers[si].active &&
+          codec_.spatialLayers[si].maxFramerate > max_fps) {
+        max_fps = codec_.spatialLayers[si].maxFramerate;
+      }
     }
-    // This spatial layer may already use a fraction of the total frame rate.
-    const float sl_fps_fraction =
-        codec_.spatialLayers[si].maxFramerate / codec_.maxFramerate;
-    for (size_t ti = 0; ti < num_temporal_layers_; ++ti) {
-      const uint32_t decimator =
-          num_temporal_layers_ <= 1 ? 1 : config_->ts_rate_decimator[ti];
-      RTC_DCHECK_GT(decimator, 0);
-      info.fps_allocation[si].push_back(rtc::saturated_cast<uint8_t>(
-          EncoderInfo::kMaxFramerateFraction * (sl_fps_fraction / decimator)));
+
+    for (size_t si = 0; si < num_spatial_layers_; ++si) {
+      info.fps_allocation[si].clear();
+      if (!codec_.spatialLayers[si].active) {
+        continue;
+      }
+
+      // This spatial layer may already use a fraction of the total frame rate.
+      const float sl_fps_fraction =
+          codec_.spatialLayers[si].maxFramerate / max_fps;
+      for (size_t ti = 0; ti < num_temporal_layers_; ++ti) {
+        const uint32_t decimator =
+            num_temporal_layers_ <= 1 ? 1 : config_->ts_rate_decimator[ti];
+        RTC_DCHECK_GT(decimator, 0);
+        info.fps_allocation[si].push_back(
+            rtc::saturated_cast<uint8_t>(EncoderInfo::kMaxFramerateFraction *
+                                         (sl_fps_fraction / decimator)));
+      }
     }
   }
   return info;
@@ -1592,6 +1645,24 @@ VP9EncoderImpl::ParseVariableFramerateConfig(std::string group_name) {
   config.steady_state_qp = qp.Get();
   config.steady_state_undershoot_percentage = undershoot_percentage.Get();
   config.frames_before_steady_state = frames_before_steady_state.Get();
+
+  return config;
+}
+
+// static
+VP9EncoderImpl::QualityScalerExperiment
+VP9EncoderImpl::ParseQualityScalerConfig(std::string group_name) {
+  FieldTrialFlag disabled = FieldTrialFlag("Disabled");
+  FieldTrialParameter<int> low_qp("low_qp", kLowVp9QpThreshold);
+  FieldTrialParameter<int> high_qp("hihg_qp", kHighVp9QpThreshold);
+  ParseFieldTrial({&disabled, &low_qp, &high_qp},
+                  field_trial::FindFullName(group_name));
+  QualityScalerExperiment config;
+  config.enabled = !disabled.Get();
+  RTC_LOG(LS_INFO) << "Webrtc quality scaler for vp9 is "
+                   << (config.enabled ? "enabled." : "disabled");
+  config.low_qp = low_qp.Get();
+  config.high_qp = high_qp.Get();
 
   return config;
 }
@@ -1635,13 +1706,31 @@ int VP9DecoderImpl::InitDecode(const VideoCodec* inst, int number_of_cores) {
   //    errors earlier than the multi-threads version.
   //  - Make peak CPU usage under control (not depending on input)
   cfg.threads = 1;
-  (void)kMaxNumTiles4kVideo;  // unused
 #else
-  // We want to use multithreading when decoding high resolution videos. But,
-  // since we don't know resolution of input stream at this stage, we always
-  // enable it.
-  cfg.threads = std::min(number_of_cores, kMaxNumTiles4kVideo);
+  if (!inst) {
+    // No config provided - don't know resolution to decode yet.
+    // Set thread count to one in the meantime.
+    cfg.threads = 1;
+  } else {
+    // We want to use multithreading when decoding high resolution videos. But
+    // not too many in order to avoid overhead when many stream are decoded
+    // concurrently.
+    // Set 2 thread as target for 1280x720 pixel count, and then scale up
+    // linearly from there - but cap at physical core count.
+    // For common resolutions this results in:
+    // 1 for 360p
+    // 2 for 720p
+    // 4 for 1080p
+    // 8 for 1440p
+    // 18 for 4K
+    int num_threads =
+        std::max(1, 2 * (inst->width * inst->height) / (1280 * 720));
+    cfg.threads = std::min(number_of_cores, num_threads);
+    current_codec_ = *inst;
+  }
 #endif
+
+  num_cores_ = number_of_cores;
 
   vpx_codec_flags_t flags = 0;
   if (vpx_codec_dec_init(decoder_, vpx_codec_vp9_dx(), &cfg, flags)) {
@@ -1660,6 +1749,15 @@ int VP9DecoderImpl::InitDecode(const VideoCodec* inst, int number_of_cores) {
       return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
     }
   }
+
+  vpx_codec_err_t status =
+      vpx_codec_control(decoder_, VP9D_SET_LOOP_FILTER_OPT, 1);
+  if (status != VPX_CODEC_OK) {
+    RTC_LOG(LS_ERROR) << "Failed to enable VP9D_SET_LOOP_FILTER_OPT. "
+                      << vpx_codec_error(decoder_);
+    return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
+  }
+
   return WEBRTC_VIDEO_CODEC_OK;
 }
 
@@ -1672,6 +1770,29 @@ int VP9DecoderImpl::Decode(const EncodedImage& input_image,
   if (decode_complete_callback_ == nullptr) {
     return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
   }
+
+  if (input_image._frameType == VideoFrameType::kVideoFrameKey) {
+    absl::optional<vp9::FrameInfo> frame_info =
+        vp9::ParseIntraFrameInfo(input_image.data(), input_image.size());
+    if (frame_info) {
+      if (frame_info->frame_width != current_codec_.width ||
+          frame_info->frame_height != current_codec_.height) {
+        // Resolution has changed, tear down and re-init a new decoder in
+        // order to get correct sizing.
+        Release();
+        current_codec_.width = frame_info->frame_width;
+        current_codec_.height = frame_info->frame_height;
+        int reinit_status = InitDecode(&current_codec_, num_cores_);
+        if (reinit_status != WEBRTC_VIDEO_CODEC_OK) {
+          RTC_LOG(LS_WARNING) << "Failed to re-init decoder.";
+          return reinit_status;
+        }
+      }
+    } else {
+      RTC_LOG(LS_WARNING) << "Failed to parse VP9 header from key-frame.";
+    }
+  }
+
   // Always start with a complete key frame.
   if (key_frame_required_) {
     if (input_image._frameType != VideoFrameType::kVideoFrameKey)
@@ -1733,7 +1854,6 @@ int VP9DecoderImpl::ReturnFrame(
   rtc::scoped_refptr<VideoFrameBuffer> img_wrapped_buffer;
   switch (img->bit_depth) {
     case 8:
-      RTC_DCHECK(img->fmt == VPX_IMG_FMT_I420 || img->fmt == VPX_IMG_FMT_I444);
       if (img->fmt == VPX_IMG_FMT_I420) {
         img_wrapped_buffer = WrapI420Buffer(
             img->d_w, img->d_h, img->planes[VPX_PLANE_Y],
@@ -1754,6 +1874,11 @@ int VP9DecoderImpl::ReturnFrame(
             // frame buffer is through a callback function. This is where we
             // should release |img_buffer|.
             rtc::KeepRefUntilDone(img_buffer));
+      } else {
+        RTC_LOG(LS_ERROR)
+            << "Unsupported pixel format produced by the decoder: "
+            << static_cast<int>(img->fmt);
+        return WEBRTC_VIDEO_CODEC_NO_OUTPUT;
       }
       break;
     case 10:

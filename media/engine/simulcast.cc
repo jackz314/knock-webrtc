@@ -22,7 +22,6 @@
 #include "modules/video_coding/utility/simulcast_rate_allocator.h"
 #include "rtc_base/arraysize.h"
 #include "rtc_base/checks.h"
-#include "rtc_base/experiments/experimental_screenshare_settings.h"
 #include "rtc_base/experiments/min_video_bitrate_experiment.h"
 #include "rtc_base/experiments/normalize_simulcast_size_experiment.h"
 #include "rtc_base/experiments/rate_control_settings.h"
@@ -45,16 +44,16 @@ constexpr char kUseLegacySimulcastLayerLimitFieldTrial[] =
 // Limits for legacy conference screensharing mode. Currently used for the
 // lower of the two simulcast streams.
 constexpr webrtc::DataRate kScreenshareDefaultTl0Bitrate =
-    webrtc::DataRate::kbps(200);
+    webrtc::DataRate::KilobitsPerSec(200);
 constexpr webrtc::DataRate kScreenshareDefaultTl1Bitrate =
-    webrtc::DataRate::kbps(1000);
+    webrtc::DataRate::KilobitsPerSec(1000);
 
 // Min/max bitrate for the higher one of the two simulcast stream used for
 // screen content.
 constexpr webrtc::DataRate kScreenshareHighStreamMinBitrate =
-    webrtc::DataRate::kbps(600);
+    webrtc::DataRate::KilobitsPerSec(600);
 constexpr webrtc::DataRate kScreenshareHighStreamMaxBitrate =
-    webrtc::DataRate::kbps(1250);
+    webrtc::DataRate::KilobitsPerSec(1250);
 
 }  // namespace
 
@@ -78,24 +77,28 @@ struct SimulcastFormat {
 // These tables describe from which resolution we can use how many
 // simulcast layers at what bitrates (maximum, target, and minimum).
 // Important!! Keep this table from high resolution to low resolution.
-// clang-format off
 constexpr const SimulcastFormat kSimulcastFormats[] = {
-  {1920, 1080, 3, webrtc::DataRate::kbps(5000), webrtc::DataRate::kbps(4000),
-    webrtc::DataRate::kbps(800)},
-  {1280, 720, 3, webrtc::DataRate::kbps(2500), webrtc::DataRate::kbps(2500),
-    webrtc::DataRate::kbps(600)},
-  {960, 540, 3, webrtc::DataRate::kbps(1200), webrtc::DataRate::kbps(1200),
-    webrtc::DataRate::kbps(350)},
-  {640, 360, 2, webrtc::DataRate::kbps(700), webrtc::DataRate::kbps(500),
-    webrtc::DataRate::kbps(150)},
-  {480, 270, 2, webrtc::DataRate::kbps(450), webrtc::DataRate::kbps(350),
-    webrtc::DataRate::kbps(150)},
-  {320, 180, 1, webrtc::DataRate::kbps(200), webrtc::DataRate::kbps(150),
-    webrtc::DataRate::kbps(30)},
-  {0, 0, 1, webrtc::DataRate::kbps(200), webrtc::DataRate::kbps(150),
-    webrtc::DataRate::kbps(30)}
-};
-// clang-format on
+    {1920, 1080, 3, webrtc::DataRate::KilobitsPerSec(5000),
+     webrtc::DataRate::KilobitsPerSec(4000),
+     webrtc::DataRate::KilobitsPerSec(800)},
+    {1280, 720, 3, webrtc::DataRate::KilobitsPerSec(2500),
+     webrtc::DataRate::KilobitsPerSec(2500),
+     webrtc::DataRate::KilobitsPerSec(600)},
+    {960, 540, 3, webrtc::DataRate::KilobitsPerSec(1200),
+     webrtc::DataRate::KilobitsPerSec(1200),
+     webrtc::DataRate::KilobitsPerSec(350)},
+    {640, 360, 2, webrtc::DataRate::KilobitsPerSec(700),
+     webrtc::DataRate::KilobitsPerSec(500),
+     webrtc::DataRate::KilobitsPerSec(150)},
+    {480, 270, 2, webrtc::DataRate::KilobitsPerSec(450),
+     webrtc::DataRate::KilobitsPerSec(350),
+     webrtc::DataRate::KilobitsPerSec(150)},
+    {320, 180, 1, webrtc::DataRate::KilobitsPerSec(200),
+     webrtc::DataRate::KilobitsPerSec(150),
+     webrtc::DataRate::KilobitsPerSec(30)},
+    {0, 0, 1, webrtc::DataRate::KilobitsPerSec(200),
+     webrtc::DataRate::KilobitsPerSec(150),
+     webrtc::DataRate::KilobitsPerSec(30)}};
 
 const int kMaxScreenshareSimulcastLayers = 2;
 
@@ -222,7 +225,7 @@ webrtc::DataRate GetTotalMaxBitrate(
     total_max_bitrate_bps += layers[s].target_bitrate_bps;
   }
   total_max_bitrate_bps += layers.back().max_bitrate_bps;
-  return webrtc::DataRate::bps(total_max_bitrate_bps);
+  return webrtc::DataRate::BitsPerSec(total_max_bitrate_bps);
 }
 
 size_t LimitSimulcastLayerCount(int width,
@@ -375,13 +378,6 @@ std::vector<webrtc::VideoStream> GetScreenshareLayers(
   // more normal layout, with the regular 3 temporal layer pattern and no fps
   // restrictions. The base simulcast layer will still use legacy setup.
   if (num_simulcast_layers == kMaxScreenshareSimulcastLayers) {
-    auto experimental_settings =
-        webrtc::ExperimentalScreenshareSettings::ParseFromFieldTrials();
-    if (temporal_layers_supported &&
-        experimental_settings.BaseLayerMaxBitrate().has_value()) {
-      layers[0].max_bitrate_bps = *experimental_settings.BaseLayerMaxBitrate();
-    }
-
     // Add optional upper simulcast layer.
     const int num_temporal_layers = DefaultNumberOfTemporalLayers(1, true);
     int max_bitrate_bps;
@@ -396,8 +392,7 @@ std::vector<webrtc::VideoStream> GetScreenshareLayers(
     } else if (DefaultNumberOfTemporalLayers(1, true) != 3 ||
                base_heavy_tl3_rate_alloc) {
       // Experimental temporal layer mode used, use increased max bitrate.
-      max_bitrate_bps = experimental_settings.TopLayerMaxBitrate().value_or(
-          kScreenshareHighStreamMaxBitrate.bps());
+      max_bitrate_bps = kScreenshareHighStreamMaxBitrate.bps();
       using_boosted_bitrate = true;
     } else {
       // Keep current bitrates with default 3tl/8 frame settings.

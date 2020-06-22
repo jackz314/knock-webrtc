@@ -35,6 +35,9 @@ void RobustThroughputEstimator::IncomingPacketFeedbackVector(
   for (const auto& packet : packet_feedback_vector) {
     // Insert the new packet.
     window_.push_back(packet);
+    window_.back().sent_packet.prior_unacked_data =
+        window_.back().sent_packet.prior_unacked_data *
+        settings_.unacked_weight;
     // In most cases, receive timestamps should already be in order, but in the
     // rare case where feedback packets have been reordered, we do some swaps to
     // ensure that the window is sorted.
@@ -73,15 +76,14 @@ absl::optional<DataRate> RobustThroughputEstimator::bitrate() const {
   Timestamp max_send_time = window_[0].sent_packet.send_time;
   Timestamp min_recv_time = window_[0].receive_time;
   Timestamp max_recv_time = window_[0].receive_time;
-  DataSize data_size = DataSize::bytes(0);
+  DataSize data_size = DataSize::Bytes(0);
   for (const auto& packet : window_) {
     min_send_time = std::min(min_send_time, packet.sent_packet.send_time);
     max_send_time = std::max(max_send_time, packet.sent_packet.send_time);
     min_recv_time = std::min(min_recv_time, packet.receive_time);
     max_recv_time = std::max(max_recv_time, packet.receive_time);
     data_size += packet.sent_packet.size;
-    data_size +=
-        packet.sent_packet.prior_unacked_data * settings_.unacked_weight;
+    data_size += packet.sent_packet.prior_unacked_data;
   }
 
   // Suppose a packet of size S is sent every T milliseconds.

@@ -14,6 +14,7 @@
 #include <memory>
 #include <utility>
 
+#include "absl/strings/string_view.h"
 #include "api/video/video_codec_type.h"
 #include "api/video_codecs/video_encoder.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -54,12 +55,14 @@ std::pair<uint32_t, uint32_t> GetMinMaxBitratesBps(const VideoCodec& codec,
 
 QualityAnalyzingVideoEncoder::QualityAnalyzingVideoEncoder(
     int id,
+    absl::string_view peer_name,
     std::unique_ptr<VideoEncoder> delegate,
     double bitrate_multiplier,
     std::map<std::string, absl::optional<int>> stream_required_spatial_index,
     EncodedImageDataInjector* injector,
     VideoQualityAnalyzerInterface* analyzer)
     : id_(id),
+      peer_name_(peer_name),
       delegate_(std::move(delegate)),
       bitrate_multiplier_(bitrate_multiplier),
       stream_required_spatial_index_(std::move(stream_required_spatial_index)),
@@ -114,9 +117,13 @@ int32_t QualityAnalyzingVideoEncoder::RegisterEncodeCompleteCallback(
 }
 
 int32_t QualityAnalyzingVideoEncoder::Release() {
+  // Release encoder first. During release process it can still encode some
+  // frames, so we don't take a lock to prevent deadlock.
+  int32_t result = delegate_->Release();
+
   rtc::CritScope crit(&lock_);
   delegate_callback_ = nullptr;
-  return delegate_->Release();
+  return result;
 }
 
 int32_t QualityAnalyzingVideoEncoder::Encode(
@@ -130,7 +137,7 @@ int32_t QualityAnalyzingVideoEncoder::Encode(
     // images from encoder. So it should be a bug in setup on in the encoder.
     RTC_DCHECK_LT(timestamp_to_frame_id_list_.size(), kMaxFrameInPipelineCount);
   }
-  analyzer_->OnFramePreEncode(frame);
+  analyzer_->OnFramePreEncode(peer_name_, frame);
   int32_t result = delegate_->Encode(frame, frame_types);
   if (result != WEBRTC_VIDEO_CODEC_OK) {
     // If origin encoder failed, then cleanup data for this frame.
@@ -148,7 +155,7 @@ int32_t QualityAnalyzingVideoEncoder::Encode(
         }
       }
     }
-    analyzer_->OnEncoderError(frame, result);
+    analyzer_->OnEncoderError(peer_name_, frame, result);
   }
   return result;
 }
@@ -157,6 +164,10 @@ void QualityAnalyzingVideoEncoder::SetRates(
     const VideoEncoder::RateControlParameters& parameters) {
   RTC_DCHECK_GT(bitrate_multiplier_, 0.0);
   if (fabs(bitrate_multiplier_ - kNoMultiplier) < kEps) {
+    {
+      rtc::CritScope crit(&lock_);
+      bitrate_allocation_ = parameters.bitrate;
+    }
     return delegate_->SetRates(parameters);
   }
 
@@ -196,6 +207,10 @@ void QualityAnalyzingVideoEncoder::SetRates(
 
   RateControlParameters adjusted_params = parameters;
   adjusted_params.bitrate = multiplied_allocation;
+  {
+    rtc::CritScope crit(&lock_);
+    bitrate_allocation_ = adjusted_params.bitrate;
+  }
   return delegate_->SetRates(adjusted_params);
 }
 
@@ -222,6 +237,7 @@ EncodedImageCallback::Result QualityAnalyzingVideoEncoder::OnEncodedImage(
     const RTPFragmentationHeader* fragmentation) {
   uint16_t frame_id;
   bool discard = false;
+  uint32_t target_encode_bitrate = 0;
   {
     rtc::CritScope crit(&lock_);
     std::pair<uint32_t, uint16_t> timestamp_frame_id;
@@ -253,11 +269,18 @@ EncodedImageCallback::Result QualityAnalyzingVideoEncoder::OnEncodedImage(
     frame_id = timestamp_frame_id.second;
 
     discard = ShouldDiscard(frame_id, encoded_image);
+    if (!discard) {
+      target_encode_bitrate = bitrate_allocation_.GetSpatialLayerSum(
+          encoded_image.SpatialIndex().value_or(0));
+    }
   }
 
   if (!discard) {
-    // Analyzer should see only encoded images, that weren't discarded.
-    analyzer_->OnFrameEncoded(frame_id, encoded_image);
+    // Analyzer should see only encoded images, that weren't discarded. But all
+    // not discarded layers have to be passed.
+    VideoQualityAnalyzerInterface::EncoderStats stats;
+    stats.target_encode_bitrate = target_encode_bitrate;
+    analyzer_->OnFrameEncoded(peer_name_, frame_id, encoded_image, stats);
   }
 
   // Image data injector injects frame id and discard flag into provided
@@ -278,7 +301,7 @@ EncodedImageCallback::Result QualityAnalyzingVideoEncoder::OnEncodedImage(
 void QualityAnalyzingVideoEncoder::OnDroppedFrame(
     EncodedImageCallback::DropReason reason) {
   rtc::CritScope crit(&lock_);
-  analyzer_->OnFrameDropped(reason);
+  analyzer_->OnFrameDropped(peer_name_, reason);
   RTC_DCHECK(delegate_callback_);
   delegate_callback_->OnDroppedFrame(reason);
 }
@@ -290,6 +313,9 @@ bool QualityAnalyzingVideoEncoder::ShouldDiscard(
   absl::optional<int> required_spatial_index =
       stream_required_spatial_index_[stream_label];
   if (required_spatial_index) {
+    if (*required_spatial_index == kAnalyzeAnySpatialStream) {
+      return false;
+    }
     absl::optional<int> cur_spatial_index = encoded_image.SpatialIndex();
     if (!cur_spatial_index) {
       cur_spatial_index = 0;
@@ -325,13 +351,15 @@ bool QualityAnalyzingVideoEncoder::ShouldDiscard(
 }
 
 QualityAnalyzingVideoEncoderFactory::QualityAnalyzingVideoEncoderFactory(
+    absl::string_view peer_name,
     std::unique_ptr<VideoEncoderFactory> delegate,
     double bitrate_multiplier,
     std::map<std::string, absl::optional<int>> stream_required_spatial_index,
     IdGenerator<int>* id_generator,
     EncodedImageDataInjector* injector,
     VideoQualityAnalyzerInterface* analyzer)
-    : delegate_(std::move(delegate)),
+    : peer_name_(peer_name),
+      delegate_(std::move(delegate)),
       bitrate_multiplier_(bitrate_multiplier),
       stream_required_spatial_index_(std::move(stream_required_spatial_index)),
       id_generator_(id_generator),
@@ -355,9 +383,9 @@ std::unique_ptr<VideoEncoder>
 QualityAnalyzingVideoEncoderFactory::CreateVideoEncoder(
     const SdpVideoFormat& format) {
   return std::make_unique<QualityAnalyzingVideoEncoder>(
-      id_generator_->GetNextId(), delegate_->CreateVideoEncoder(format),
-      bitrate_multiplier_, stream_required_spatial_index_, injector_,
-      analyzer_);
+      id_generator_->GetNextId(), peer_name_,
+      delegate_->CreateVideoEncoder(format), bitrate_multiplier_,
+      stream_required_spatial_index_, injector_, analyzer_);
 }
 
 }  // namespace webrtc_pc_e2e

@@ -39,12 +39,15 @@ constexpr size_t kDefaultPacketSize = 234;
 // Mock callback implementing the raw api.
 class MockCallback : public PacketRouter {
  public:
-  MOCK_METHOD2(SendPacket,
-               void(std::unique_ptr<RtpPacketToSend> packet,
-                    const PacedPacketInfo& cluster_info));
-  MOCK_METHOD1(
-      GeneratePadding,
-      std::vector<std::unique_ptr<RtpPacketToSend>>(size_t target_size_bytes));
+  MOCK_METHOD(void,
+              SendPacket,
+              (std::unique_ptr<RtpPacketToSend> packet,
+               const PacedPacketInfo& cluster_info),
+              (override));
+  MOCK_METHOD(std::vector<std::unique_ptr<RtpPacketToSend>>,
+              GeneratePadding,
+              (DataSize target_size),
+              (override));
 };
 
 class ProcessModeTrials : public WebRtcKeyValueConfig {
@@ -120,8 +123,9 @@ class PacedSenderTest
 TEST_P(PacedSenderTest, PacesPackets) {
   // Insert a number of packets, covering one second.
   static constexpr size_t kPacketsToSend = 42;
-  pacer_->SetPacingRates(DataRate::bps(kDefaultPacketSize * 8 * kPacketsToSend),
-                         DataRate::Zero());
+  pacer_->SetPacingRates(
+      DataRate::BitsPerSec(kDefaultPacketSize * 8 * kPacketsToSend),
+      DataRate::Zero());
   std::vector<std::unique_ptr<RtpPacketToSend>> packets;
   for (size_t i = 0; i < kPacketsToSend; ++i) {
     packets.emplace_back(BuildRtpPacket(RtpPacketMediaType::kVideo));

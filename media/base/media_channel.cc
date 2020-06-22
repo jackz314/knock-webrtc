@@ -12,7 +12,8 @@
 
 namespace cricket {
 
-VideoOptions::VideoOptions() = default;
+VideoOptions::VideoOptions()
+    : content_hint(webrtc::VideoTrackInterface::ContentHint::kNone) {}
 VideoOptions::~VideoOptions() = default;
 
 MediaChannel::MediaChannel(const MediaConfig& config)
@@ -22,12 +23,9 @@ MediaChannel::MediaChannel() : enable_dscp_(false) {}
 
 MediaChannel::~MediaChannel() {}
 
-void MediaChannel::SetInterface(
-    NetworkInterface* iface,
-    const webrtc::MediaTransportConfig& media_transport_config) {
+void MediaChannel::SetInterface(NetworkInterface* iface) {
   rtc::CritScope cs(&network_interface_crit_);
   network_interface_ = iface;
-  media_transport_config_ = media_transport_config;
   UpdateDscp();
 }
 
@@ -48,6 +46,13 @@ void MediaChannel::SetFrameDecryptor(
 }
 
 void MediaChannel::SetVideoCodecSwitchingEnabled(bool enabled) {}
+
+void MediaChannel::SetEncoderToPacketizerFrameTransformer(
+    uint32_t ssrc,
+    rtc::scoped_refptr<webrtc::FrameTransformerInterface> frame_transformer) {}
+void MediaChannel::SetDepacketizerToDecoderFrameTransformer(
+    uint32_t ssrc,
+    rtc::scoped_refptr<webrtc::FrameTransformerInterface> frame_transformer) {}
 
 MediaSenderInfo::MediaSenderInfo() = default;
 MediaSenderInfo::~MediaSenderInfo() = default;

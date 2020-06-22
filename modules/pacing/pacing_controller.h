@@ -55,8 +55,8 @@ class PacingController {
   class PacketSender {
    public:
     virtual ~PacketSender() = default;
-    virtual void SendRtpPacket(std::unique_ptr<RtpPacketToSend> packet,
-                               const PacedPacketInfo& cluster_info) = 0;
+    virtual void SendPacket(std::unique_ptr<RtpPacketToSend> packet,
+                            const PacedPacketInfo& cluster_info) = 0;
     virtual std::vector<std::unique_ptr<RtpPacketToSend>> GeneratePadding(
         DataSize size) = 0;
   };
@@ -146,6 +146,8 @@ class PacingController {
 
   bool Congested() const;
 
+  bool IsProbing() const;
+
  private:
   void EnqueuePacketInternal(std::unique_ptr<RtpPacketToSend> packet,
                              int priority);
@@ -181,6 +183,9 @@ class PacingController {
   const bool pace_audio_;
   const bool small_first_probe_packet_;
   const bool ignore_transport_overhead_;
+  // In dynamic mode, indicates the target size when requesting padding,
+  // expressed as a duration in order to adjust for varying padding rate.
+  const TimeDelta padding_target_duration_;
 
   TimeDelta min_packet_limit_;
 

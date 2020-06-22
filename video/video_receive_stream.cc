@@ -211,11 +211,13 @@ VideoReceiveStream::VideoReceiveStream(
                                  &config_,
                                  rtp_receive_statistics_.get(),
                                  &stats_proxy_,
+                                 &stats_proxy_,
                                  process_thread_,
                                  this,     // NackSender
                                  nullptr,  // Use default KeyFrameRequestSender
                                  this,     // OnCompleteFrameCallback
-                                 config_.frame_decryptor),
+                                 config_.frame_decryptor,
+                                 config_.frame_transformer),
       rtp_stream_sync_(this),
       max_wait_for_keyframe_ms_(KeyframeIntervalSettings::ParseFromFieldTrials()
                                     .MaxWaitForKeyframeMs()
@@ -532,6 +534,12 @@ void VideoReceiveStream::OnFrame(const VideoFrame& video_frame) {
 void VideoReceiveStream::SetFrameDecryptor(
     rtc::scoped_refptr<webrtc::FrameDecryptorInterface> frame_decryptor) {
   rtp_video_stream_receiver_.SetFrameDecryptor(std::move(frame_decryptor));
+}
+
+void VideoReceiveStream::SetDepacketizerToDecoderFrameTransformer(
+    rtc::scoped_refptr<FrameTransformerInterface> frame_transformer) {
+  rtp_video_stream_receiver_.SetDepacketizerToDecoderFrameTransformer(
+      std::move(frame_transformer));
 }
 
 void VideoReceiveStream::SendNack(const std::vector<uint16_t>& sequence_numbers,

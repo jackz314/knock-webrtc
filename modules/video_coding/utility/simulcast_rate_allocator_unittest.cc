@@ -38,14 +38,16 @@ constexpr uint32_t kSimulcastScreenshareMaxBitrateKbps = 1250;
 
 class MockTemporalLayers : public Vp8FrameBufferController {
  public:
-  MOCK_METHOD2(NextFrameConfig, Vp8FrameConfig(size_t, uint32_t));
-  MOCK_METHOD3(OnRatesUpdated, void(size_t, const std::vector<uint32_t>&, int));
-  MOCK_METHOD1(UpdateConfiguration, Vp8EncoderConfig(size_t));
-  MOCK_METHOD6(OnEncodeDone,
-               void(size_t, uint32_t, size_t, bool, int, CodecSpecificInfo*));
-  MOCK_METHOD4(FrameEncoded, void(size_t, uint32_t, size_t, int));
-  MOCK_CONST_METHOD0(Tl0PicIdx, uint8_t());
-  MOCK_CONST_METHOD1(GetTemporalLayerId, int(const Vp8FrameConfig&));
+  MOCK_METHOD(Vp8FrameConfig, NextFrameConfig, (size_t, uint32_t), (override));
+  MOCK_METHOD(void,
+              OnRatesUpdated,
+              (size_t, const std::vector<uint32_t>&, int),
+              (override));
+  MOCK_METHOD(Vp8EncoderConfig, UpdateConfiguration, (size_t), (override));
+  MOCK_METHOD(void,
+              OnEncodeDone,
+              (size_t, uint32_t, size_t, bool, int, CodecSpecificInfo*),
+              (override));
 };
 }  // namespace
 
@@ -133,7 +135,7 @@ class SimulcastRateAllocatorTest : public ::testing::TestWithParam<bool> {
 
   VideoBitrateAllocation GetAllocation(uint32_t target_bitrate) {
     return allocator_->Allocate(VideoBitrateAllocationParameters(
-        DataRate::kbps(target_bitrate), kDefaultFrameRate));
+        DataRate::KilobitsPerSec(target_bitrate), kDefaultFrameRate));
   }
 
   VideoBitrateAllocation GetAllocation(DataRate target_rate,
@@ -143,15 +145,18 @@ class SimulcastRateAllocatorTest : public ::testing::TestWithParam<bool> {
   }
 
   DataRate MinRate(size_t layer_index) const {
-    return DataRate::kbps(codec_.simulcastStream[layer_index].minBitrate);
+    return DataRate::KilobitsPerSec(
+        codec_.simulcastStream[layer_index].minBitrate);
   }
 
   DataRate TargetRate(size_t layer_index) const {
-    return DataRate::kbps(codec_.simulcastStream[layer_index].targetBitrate);
+    return DataRate::KilobitsPerSec(
+        codec_.simulcastStream[layer_index].targetBitrate);
   }
 
   DataRate MaxRate(size_t layer_index) const {
-    return DataRate::kbps(codec_.simulcastStream[layer_index].maxBitrate);
+    return DataRate::KilobitsPerSec(
+        codec_.simulcastStream[layer_index].maxBitrate);
   }
 
  protected:
@@ -590,8 +595,8 @@ TEST_F(SimulcastRateAllocatorTest, StableRate) {
     // Let stable rate go to a bitrate below what is needed for two streams.
     uint32_t expected[] = {MaxRate(0).kbps<uint32_t>(), 0};
     ExpectEqual(expected,
-                GetAllocation(volatile_rate,
-                              TargetRate(0) + MinRate(1) - DataRate::bps(1)));
+                GetAllocation(volatile_rate, TargetRate(0) + MinRate(1) -
+                                                 DataRate::BitsPerSec(1)));
   }
 
   {

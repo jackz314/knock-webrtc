@@ -34,6 +34,7 @@
 #include "rtc_base/critical_section.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/null_socket_server.h"
+#include "rtc_base/task_utils/to_queued_task.h"
 #include "rtc_base/time_utils.h"
 #include "rtc_base/trace_event.h"
 
@@ -142,8 +143,43 @@ void ThreadManager::RemoveInternal(Thread* message_queue) {
     if (iter != message_queues_.end()) {
       message_queues_.erase(iter);
     }
+#if RTC_DCHECK_IS_ON
+    RemoveFromSendGraph(message_queue);
+#endif
   }
 }
+
+#if RTC_DCHECK_IS_ON
+void ThreadManager::RemoveFromSendGraph(Thread* thread) {
+  for (auto it = send_graph_.begin(); it != send_graph_.end();) {
+    if (it->first == thread) {
+      it = send_graph_.erase(it);
+    } else {
+      it->second.erase(thread);
+      ++it;
+    }
+  }
+}
+
+void ThreadManager::RegisterSendAndCheckForCycles(Thread* source,
+                                                  Thread* target) {
+  CritScope cs(&crit_);
+  std::deque<Thread*> all_targets({target});
+  // We check the pre-existing who-sends-to-who graph for any path from target
+  // to source. This loop is guaranteed to terminate because per the send graph
+  // invariant, there are no cycles in the graph.
+  for (size_t i = 0; i < all_targets.size(); i++) {
+    const auto& targets = send_graph_[all_targets[i]];
+    all_targets.insert(all_targets.end(), targets.begin(), targets.end());
+  }
+  RTC_CHECK_EQ(absl::c_count(all_targets, source), 0)
+      << " send loop between " << source->name() << " and " << target->name();
+
+  // We may now insert source -> target without creating a cycle, since there
+  // was no path from target to source per the prior CHECK.
+  send_graph_[source].insert(target);
+}
+#endif
 
 // static
 void ThreadManager::Clear(MessageHandler* handler) {
@@ -260,6 +296,21 @@ void ThreadManager::SetCurrentThread(Thread* thread) {
     RTC_DLOG(LS_ERROR) << "SetCurrentThread: Overwriting an existing value?";
   }
 #endif  // RTC_DLOG_IS_ON
+
+  if (thread) {
+    thread->EnsureIsCurrentTaskQueue();
+  } else {
+    Thread* current = CurrentThread();
+    if (current) {
+      // The current thread is being cleared, e.g. as a result of
+      // UnwrapCurrent() being called or when a thread is being stopped
+      // (see PreRun()). This signals that the Thread instance is being detached
+      // from the thread, which also means that TaskQueue::Current() must not
+      // return a pointer to the Thread instance.
+      current->ClearCurrentTaskQueue();
+    }
+  }
+
   SetCurrentThreadInternal(thread);
 }
 
@@ -404,9 +455,6 @@ bool Thread::Get(Message* pmsg, int cmsWait, bool process_io) {
   int64_t msStart = TimeMillis();
   int64_t msCurrent = msStart;
   while (true) {
-    // Check for sent messages
-    ReceiveSendsFromThread(nullptr);
-
     // Check for posted events
     int64_t cmsDelayNext = kForever;
     bool first_pass = true;
@@ -791,7 +839,6 @@ void* Thread::PreRun(void* pv) {
   Thread* thread = static_cast<Thread*>(pv);
   ThreadManager::Instance()->SetCurrentThread(thread);
   rtc::SetCurrentThreadName(thread->name_.c_str());
-  CurrentTaskQueueSetter set_current_task_queue(thread);
 #if defined(WEBRTC_MAC)
   ScopedAutoReleasePool pool;
 #endif
@@ -836,7 +883,7 @@ void Thread::Send(const Location& posted_from,
   msg.message_id = id;
   msg.pdata = pdata;
   if (IsCurrent()) {
-    phandler->OnMessage(&msg);
+    msg.phandler->OnMessage(&msg);
     return;
   }
 
@@ -845,27 +892,23 @@ void Thread::Send(const Location& posted_from,
   AutoThread thread;
   Thread* current_thread = Thread::Current();
   RTC_DCHECK(current_thread != nullptr);  // AutoThread ensures this
-
+#if RTC_DCHECK_IS_ON
+  ThreadManager::Instance()->RegisterSendAndCheckForCycles(current_thread,
+                                                           this);
+#endif
   bool ready = false;
-  {
-    CritScope cs(&crit_);
-    _SendMessage smsg;
-    smsg.thread = current_thread;
-    smsg.msg = msg;
-    smsg.ready = &ready;
-    sendlist_.push_back(smsg);
-  }
-
-  // Wait for a reply
-  WakeUpSocketServer();
+  PostTask(
+      webrtc::ToQueuedTask([msg]() mutable { msg.phandler->OnMessage(&msg); },
+                           [this, &ready, current_thread] {
+                             CritScope cs(&crit_);
+                             ready = true;
+                             current_thread->socketserver()->WakeUp();
+                           }));
 
   bool waited = false;
   crit_.Enter();
   while (!ready) {
     crit_.Leave();
-    // We need to limit "ReceiveSends" to |this| thread to avoid an arbitrary
-    // thread invoking calls on the current thread.
-    current_thread->ReceiveSendsFromThread(this);
     current_thread->socketserver()->Wait(kForever, false);
     waited = true;
     crit_.Enter();
@@ -888,38 +931,6 @@ void Thread::Send(const Location& posted_from,
   }
 }
 
-void Thread::ReceiveSendsFromThread(const Thread* source) {
-  // Receive a sent message. Cleanup scenarios:
-  // - thread sending exits: We don't allow this, since thread can exit
-  //   only via Join, so Send must complete.
-  // - thread receiving exits: Wakeup/set ready in Thread::Clear()
-  // - object target cleared: Wakeup/set ready in Thread::Clear()
-  _SendMessage smsg;
-
-  crit_.Enter();
-  while (PopSendMessageFromThread(source, &smsg)) {
-    crit_.Leave();
-
-    Dispatch(&smsg.msg);
-
-    crit_.Enter();
-    *smsg.ready = true;
-    smsg.thread->socketserver()->WakeUp();
-  }
-  crit_.Leave();
-}
-
-bool Thread::PopSendMessageFromThread(const Thread* source, _SendMessage* msg) {
-  for (auto it = sendlist_.begin(); it != sendlist_.end(); ++it) {
-    if (it->thread == source || source == nullptr) {
-      *msg = *it;
-      sendlist_.erase(it);
-      return true;
-    }
-  }
-  return false;
-}
-
 void Thread::InvokeInternal(const Location& posted_from,
                             rtc::FunctionView<void()> functor) {
   TRACE_EVENT2("webrtc", "Thread::Invoke", "src_file", posted_from.file_name(),
@@ -936,6 +947,17 @@ void Thread::InvokeInternal(const Location& posted_from,
   } handler(functor);
 
   Send(posted_from, &handler);
+}
+
+// Called by the ThreadManager when being set as the current thread.
+void Thread::EnsureIsCurrentTaskQueue() {
+  task_queue_registration_ =
+      std::make_unique<TaskQueueBase::CurrentTaskQueueSetter>(this);
+}
+
+// Called by the ThreadManager when being set as the current thread.
+void Thread::ClearCurrentTaskQueue() {
+  task_queue_registration_.reset();
 }
 
 void Thread::QueuedTaskHandler::OnMessage(Message* msg) {
@@ -981,26 +1003,6 @@ void Thread::Clear(MessageHandler* phandler,
                    uint32_t id,
                    MessageList* removed) {
   CritScope cs(&crit_);
-
-  // Remove messages on sendlist_ with phandler
-  // Object target cleared: remove from send list, wakeup/set ready
-  // if sender not null.
-  for (auto iter = sendlist_.begin(); iter != sendlist_.end();) {
-    _SendMessage smsg = *iter;
-    if (smsg.msg.Match(phandler, id)) {
-      if (removed) {
-        removed->push_back(smsg.msg);
-      } else {
-        delete smsg.msg.pdata;
-      }
-      iter = sendlist_.erase(iter);
-      *smsg.ready = true;
-      smsg.thread->socketserver()->WakeUp();
-      continue;
-    }
-    ++iter;
-  }
-
   ClearInternal(phandler, id, removed);
 }
 

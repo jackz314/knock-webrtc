@@ -51,6 +51,19 @@ namespace cricket {
 
 class WebRtcVideoChannel;
 
+// Public for testing.
+// Inputs StreamStats for all types of substreams (kMedia, kRtx, kFlexfec) and
+// merges any non-kMedia substream stats object into its referenced kMedia-type
+// substream. The resulting substreams are all kMedia. This means, for example,
+// that packet and byte counters of RTX and FlexFEC streams are accounted for in
+// the relevant RTP media stream's stats. This makes the resulting StreamStats
+// objects ready to be turned into "outbound-rtp" stats objects for GetStats()
+// which does not create separate stream stats objects for complementary
+// streams.
+std::map<uint32_t, webrtc::VideoSendStream::StreamStats>
+MergeInfoAboutOutboundRtpSubstreamsForTesting(
+    const std::map<uint32_t, webrtc::VideoSendStream::StreamStats>& substreams);
+
 class UnsignalledSsrcHandler {
  public:
   enum Action {
@@ -97,8 +110,10 @@ class WebRtcVideoEngine : public VideoEngineInterface {
       webrtc::VideoBitrateAllocatorFactory* video_bitrate_allocator_factory)
       override;
 
-  std::vector<VideoCodec> codecs() const override;
-  RtpCapabilities GetCapabilities() const override;
+  std::vector<VideoCodec> send_codecs() const override;
+  std::vector<VideoCodec> recv_codecs() const override;
+  std::vector<webrtc::RtpHeaderExtensionCapability> GetRtpHeaderExtensions()
+      const override;
 
  private:
   const std::unique_ptr<webrtc::VideoDecoderFactory> decoder_factory_;
@@ -154,9 +169,7 @@ class WebRtcVideoChannel : public VideoMediaChannel,
   void OnReadyToSend(bool ready) override;
   void OnNetworkRouteChanged(const std::string& transport_name,
                              const rtc::NetworkRoute& network_route) override;
-  void SetInterface(
-      NetworkInterface* iface,
-      const webrtc::MediaTransportConfig& media_transport_config) override;
+  void SetInterface(NetworkInterface* iface) override;
 
   // E2E Encrypted Video Frame API
   // Set a frame decryptor to a particular ssrc that will intercept all
@@ -223,6 +236,15 @@ class WebRtcVideoChannel : public VideoMediaChannel,
       override;
   void ClearRecordableEncodedFrameCallback(uint32_t ssrc) override;
   void GenerateKeyFrame(uint32_t ssrc) override;
+
+  void SetEncoderToPacketizerFrameTransformer(
+      uint32_t ssrc,
+      rtc::scoped_refptr<webrtc::FrameTransformerInterface> frame_transformer)
+      override;
+  void SetDepacketizerToDecoderFrameTransformer(
+      uint32_t ssrc,
+      rtc::scoped_refptr<webrtc::FrameTransformerInterface> frame_transformer)
+      override;
 
  private:
   class WebRtcVideoReceiveStream;
@@ -333,8 +355,17 @@ class WebRtcVideoChannel : public VideoMediaChannel,
     void SetSend(bool send);
 
     const std::vector<uint32_t>& GetSsrcs() const;
-    VideoSenderInfo GetVideoSenderInfo(bool log_stats);
+    // Returns per ssrc VideoSenderInfos. Useful for simulcast scenario.
+    std::vector<VideoSenderInfo> GetPerLayerVideoSenderInfos(bool log_stats);
+    // Aggregates per ssrc VideoSenderInfos to single VideoSenderInfo for
+    // legacy reasons. Used in old GetStats API and track stats.
+    VideoSenderInfo GetAggregatedVideoSenderInfo(
+        const std::vector<VideoSenderInfo>& infos) const;
     void FillBitrateInfo(BandwidthEstimationInfo* bwe_info);
+
+    void SetEncoderToPacketizerFrameTransformer(
+        rtc::scoped_refptr<webrtc::FrameTransformerInterface>
+            frame_transformer);
 
    private:
     // Parameters needed to reconstruct the underlying stream.
@@ -453,6 +484,10 @@ class WebRtcVideoChannel : public VideoMediaChannel,
         std::function<void(const webrtc::RecordableEncodedFrame&)> callback);
     void ClearRecordableEncodedFrameCallback();
     void GenerateKeyFrame();
+
+    void SetDepacketizerToDecoderFrameTransformer(
+        rtc::scoped_refptr<webrtc::FrameTransformerInterface>
+            frame_transformer);
 
    private:
     void RecreateWebRtcVideoStream();
@@ -587,6 +622,10 @@ class WebRtcVideoChannel : public VideoMediaChannel,
   // Per peer connection crypto options that last for the lifetime of the peer
   // connection.
   const webrtc::CryptoOptions crypto_options_ RTC_GUARDED_BY(thread_checker_);
+
+  // Optional frame transformer set on unsignaled streams.
+  rtc::scoped_refptr<webrtc::FrameTransformerInterface>
+      unsignaled_frame_transformer_ RTC_GUARDED_BY(thread_checker_);
 
   // Buffer for unhandled packets.
   std::unique_ptr<UnhandledPacketsBuffer> unknown_ssrc_packet_buffer_

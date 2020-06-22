@@ -15,6 +15,7 @@
 #include <memory>
 #include <utility>
 
+#include "absl/strings/string_view.h"
 #include "absl/types/optional.h"
 #include "api/video/i420_buffer.h"
 #include "modules/video_coding/include/video_error_codes.h"
@@ -26,10 +27,12 @@ namespace webrtc_pc_e2e {
 
 QualityAnalyzingVideoDecoder::QualityAnalyzingVideoDecoder(
     int id,
+    absl::string_view peer_name,
     std::unique_ptr<VideoDecoder> delegate,
     EncodedImageDataExtractor* extractor,
     VideoQualityAnalyzerInterface* analyzer)
     : id_(id),
+      peer_name_(peer_name),
       implementation_name_("AnalyzingDecoder-" +
                            std::string(delegate->ImplementationName())),
       delegate_(std::move(delegate)),
@@ -87,7 +90,7 @@ int32_t QualityAnalyzingVideoDecoder::Decode(const EncodedImage& input_image,
   // We can safely dereference |origin_image|, because it can be removed from
   // the map only after |delegate_| Decode method will be invoked. Image will be
   // removed inside DecodedImageCallback, which can be done on separate thread.
-  analyzer_->OnFramePreDecode(out.id, *origin_image);
+  analyzer_->OnFramePreDecode(peer_name_, out.id, *origin_image);
   int32_t result =
       delegate_->Decode(*origin_image, missing_frames, render_time_ms);
   if (result != WEBRTC_VIDEO_CODEC_OK) {
@@ -97,7 +100,7 @@ int32_t QualityAnalyzingVideoDecoder::Decode(const EncodedImage& input_image,
       timestamp_to_frame_id_.erase(input_image.Timestamp());
       decoding_images_.erase(out.id);
     }
-    analyzer_->OnDecoderError(out.id, result);
+    analyzer_->OnDecoderError(peer_name_, out.id, result);
   }
   return result;
 }
@@ -109,11 +112,15 @@ int32_t QualityAnalyzingVideoDecoder::RegisterDecodeCompleteCallback(
 }
 
 int32_t QualityAnalyzingVideoDecoder::Release() {
+  // Release decoder first. During release process it can still decode some
+  // frames, so we don't take a lock to prevent deadlock.
+  int32_t result = delegate_->Release();
+
   rtc::CritScope crit(&lock_);
   analyzing_callback_->SetDelegateCallback(nullptr);
   timestamp_to_frame_id_.clear();
   decoding_images_.clear();
-  return delegate_->Release();
+  return result;
 }
 
 bool QualityAnalyzingVideoDecoder::PrefersLateDecoding() const {
@@ -218,15 +225,19 @@ void QualityAnalyzingVideoDecoder::OnFrameDecoded(
   // Set frame id to the value, that was extracted from corresponding encoded
   // image.
   frame->set_id(frame_id);
-  analyzer_->OnFrameDecoded(*frame, decode_time_ms, qp);
+  VideoQualityAnalyzerInterface::DecoderStats stats;
+  stats.decode_time_ms = decode_time_ms;
+  analyzer_->OnFrameDecoded(peer_name_, *frame, stats);
 }
 
 QualityAnalyzingVideoDecoderFactory::QualityAnalyzingVideoDecoderFactory(
+    absl::string_view peer_name,
     std::unique_ptr<VideoDecoderFactory> delegate,
     IdGenerator<int>* id_generator,
     EncodedImageDataExtractor* extractor,
     VideoQualityAnalyzerInterface* analyzer)
-    : delegate_(std::move(delegate)),
+    : peer_name_(peer_name),
+      delegate_(std::move(delegate)),
       id_generator_(id_generator),
       extractor_(extractor),
       analyzer_(analyzer) {}
@@ -243,7 +254,8 @@ QualityAnalyzingVideoDecoderFactory::CreateVideoDecoder(
     const SdpVideoFormat& format) {
   std::unique_ptr<VideoDecoder> decoder = delegate_->CreateVideoDecoder(format);
   return std::make_unique<QualityAnalyzingVideoDecoder>(
-      id_generator_->GetNextId(), std::move(decoder), extractor_, analyzer_);
+      id_generator_->GetNextId(), peer_name_, std::move(decoder), extractor_,
+      analyzer_);
 }
 
 std::unique_ptr<VideoDecoder>
@@ -253,7 +265,8 @@ QualityAnalyzingVideoDecoderFactory::LegacyCreateVideoDecoder(
   std::unique_ptr<VideoDecoder> decoder =
       delegate_->LegacyCreateVideoDecoder(format, receive_stream_id);
   return std::make_unique<QualityAnalyzingVideoDecoder>(
-      id_generator_->GetNextId(), std::move(decoder), extractor_, analyzer_);
+      id_generator_->GetNextId(), peer_name_, std::move(decoder), extractor_,
+      analyzer_);
 }
 
 }  // namespace webrtc_pc_e2e

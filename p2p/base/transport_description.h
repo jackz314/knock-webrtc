@@ -83,6 +83,10 @@ struct IceParameters {
   bool operator!=(const IceParameters& other) const {
     return !(*this == other);
   }
+
+  // Validate IceParameters, returns a SyntaxError if the ufrag or pwd are
+  // malformed.
+  webrtc::RTCError Validate() const;
 };
 
 extern const char CONNECTIONROLE_ACTIVE_STR[];
@@ -95,28 +99,6 @@ constexpr auto* ICE_OPTION_RENOMINATION = "renomination";
 
 bool StringToConnectionRole(const std::string& role_str, ConnectionRole* role);
 bool ConnectionRoleToString(const ConnectionRole& role, std::string* role_str);
-
-// Parameters for an opaque transport protocol which may be plugged into WebRTC.
-struct OpaqueTransportParameters {
-  // Protocol used by this opaque transport.  Two endpoints that support the
-  // same protocol are expected to be able to understand the contents of each
-  // others' |parameters| fields.  If those parameters are compatible, the
-  // endpoints are expected to use this transport protocol.
-  std::string protocol;
-
-  // Opaque parameters for this transport.  These parameters are serialized in a
-  // manner determined by the |protocol|.  They can be parsed and understood by
-  // the plugin that supports |protocol|.
-  std::string parameters;
-
-  bool operator==(const OpaqueTransportParameters& other) const {
-    return protocol == other.protocol && parameters == other.parameters;
-  }
-
-  bool operator!=(const OpaqueTransportParameters& other) const {
-    return !(*this == other);
-  }
-};
 
 struct TransportDescription {
   TransportDescription();
@@ -142,7 +124,7 @@ struct TransportDescription {
   }
   bool secure() const { return identity_fingerprint != nullptr; }
 
-  IceParameters GetIceParameters() {
+  IceParameters GetIceParameters() const {
     return IceParameters(ice_ufrag, ice_pwd,
                          HasOption(ICE_OPTION_RENOMINATION));
   }
@@ -164,7 +146,6 @@ struct TransportDescription {
   ConnectionRole connection_role;
 
   std::unique_ptr<rtc::SSLFingerprint> identity_fingerprint;
-  absl::optional<OpaqueTransportParameters> opaque_parameters;
 };
 
 }  // namespace cricket

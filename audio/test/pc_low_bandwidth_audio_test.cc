@@ -10,6 +10,7 @@
 
 #include <memory>
 
+#include "absl/flags/declare.h"
 #include "absl/flags/flag.h"
 #include "api/test/create_network_emulation_manager.h"
 #include "api/test/create_peerconnection_quality_test_fixture.h"
@@ -105,12 +106,12 @@ std::string AudioOutputFile() {
 
 std::string PerfResultsOutputFile() {
   return webrtc::test::OutputPath() + "PCLowBandwidth_perf_" +
-         FileSampleRateSuffix() + ".json";
+         FileSampleRateSuffix() + ".pb";
 }
 
 void LogTestResults() {
   std::string perf_results_output_file = PerfResultsOutputFile();
-  webrtc::test::WritePerfResults(perf_results_output_file);
+  EXPECT_TRUE(webrtc::test::WritePerfResults(perf_results_output_file));
 
   const ::testing::TestInfo* const test_info =
       ::testing::UnitTest::GetInstance()->current_test_info();

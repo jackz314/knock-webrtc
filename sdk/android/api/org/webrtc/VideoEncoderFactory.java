@@ -19,16 +19,15 @@ public interface VideoEncoderFactory {
     @CalledByNative("VideoEncoderSelector") void onCurrentEncoder(VideoCodecInfo info);
 
     /**
-     * Called with the current encoding bitrate. Returns null if the encoder
-     * selector which to keep the current encoder or a VideoCodecInfo if a
-     * new encoder is preferred.
+     * Called with the current available bitrate. Returns null if the encoder selector prefers to
+     * keep the current encoder or a VideoCodecInfo if a new encoder is preferred.
      */
-    @Nullable @CalledByNative("VideoEncoderSelector") VideoCodecInfo onEncodingBitrate(int kbps);
+    @Nullable @CalledByNative("VideoEncoderSelector") VideoCodecInfo onAvailableBitrate(int kbps);
 
     /**
-     * Called when the currently used encoder signal itself as broken. Returns
-     * null if the encoder selector which to keep the current encoder or a
-     * VideoCodecInfo if a new encoder is preferred.
+     * Called when the currently used encoder signal itself as broken. Returns null if the encoder
+     * selector prefers to keep the current encoder or a VideoCodecInfo if a new encoder is
+     * preferred.
      */
     @Nullable @CalledByNative("VideoEncoderSelector") VideoCodecInfo onEncoderBroken();
   }

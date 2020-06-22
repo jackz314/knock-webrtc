@@ -1076,6 +1076,7 @@ void ParsedRtcEventLog::Clear() {
 
   first_timestamp_ = std::numeric_limits<int64_t>::max();
   last_timestamp_ = std::numeric_limits<int64_t>::min();
+  first_log_segment_ = LogSegment(0, std::numeric_limits<int64_t>::max());
 
   incoming_rtp_extensions_maps_.clear();
   outgoing_rtp_extensions_maps_.clear();
@@ -1214,6 +1215,38 @@ ParsedRtcEventLog::ParseStatus ParsedRtcEventLog::ParseStream(
   StoreFirstAndLastTimestamp(generic_packets_sent_);
   StoreFirstAndLastTimestamp(generic_packets_received_);
   StoreFirstAndLastTimestamp(generic_acks_received_);
+  StoreFirstAndLastTimestamp(remote_estimate_events_);
+
+  // Stop events could be missing due to file size limits. If so, use the
+  // last event, or the next start timestamp if available.
+  // TODO(terelius): This could be improved. Instead of using the next start
+  // event, we could use the timestamp of the the last previous regular event.
+  auto start_iter = start_log_events().begin();
+  auto stop_iter = stop_log_events().begin();
+  int64_t start_us = first_timestamp();
+  int64_t next_start_us = std::numeric_limits<int64_t>::max();
+  int64_t stop_us = std::numeric_limits<int64_t>::max();
+  if (start_iter != start_log_events().end()) {
+    start_us = std::min(start_us, start_iter->log_time_us());
+    ++start_iter;
+    if (start_iter != start_log_events().end())
+      next_start_us = start_iter->log_time_us();
+  }
+  if (stop_iter != stop_log_events().end()) {
+    stop_us = stop_iter->log_time_us();
+  }
+  stop_us = std::min(stop_us, next_start_us);
+  if (stop_us == std::numeric_limits<int64_t>::max() &&
+      last_timestamp() != std::numeric_limits<int64_t>::min()) {
+    stop_us = last_timestamp();
+  }
+  RTC_PARSE_CHECK_OR_RETURN_LE(start_us, stop_us);
+  first_log_segment_ = LogSegment(start_us, stop_us);
+
+  if (first_timestamp_ == std::numeric_limits<int64_t>::max() &&
+      last_timestamp_ == std::numeric_limits<int64_t>::min()) {
+    first_timestamp_ = last_timestamp_ = 0;
+  }
 
   return status;
 }
@@ -2407,14 +2440,14 @@ ParsedRtcEventLog::ParseStatus ParsedRtcEventLog::StoreRemoteEstimateEvent(
   if (proto.has_link_capacity_lower_kbps()) {
     base_link_capacity_lower_kbps = proto.link_capacity_lower_kbps();
     base_event.link_capacity_lower =
-        DataRate::kbps(proto.link_capacity_lower_kbps());
+        DataRate::KilobitsPerSec(proto.link_capacity_lower_kbps());
   }
 
   absl::optional<uint64_t> base_link_capacity_upper_kbps;
   if (proto.has_link_capacity_upper_kbps()) {
     base_link_capacity_upper_kbps = proto.link_capacity_upper_kbps();
     base_event.link_capacity_upper =
-        DataRate::kbps(proto.link_capacity_upper_kbps());
+        DataRate::KilobitsPerSec(proto.link_capacity_upper_kbps());
   }
 
   remote_estimate_events_.push_back(base_event);
@@ -2452,10 +2485,10 @@ ParsedRtcEventLog::ParseStatus ParsedRtcEventLog::StoreRemoteEstimateEvent(
     event.timestamp_ms = *timestamp_ms_values[i];
     if (link_capacity_lower_kbps_values[i])
       event.link_capacity_lower =
-          DataRate::kbps(*link_capacity_lower_kbps_values[i]);
+          DataRate::KilobitsPerSec(*link_capacity_lower_kbps_values[i]);
     if (link_capacity_upper_kbps_values[i])
       event.link_capacity_upper =
-          DataRate::kbps(*link_capacity_upper_kbps_values[i]);
+          DataRate::KilobitsPerSec(*link_capacity_upper_kbps_values[i]);
     remote_estimate_events_.push_back(event);
   }
   return ParseStatus::Success();

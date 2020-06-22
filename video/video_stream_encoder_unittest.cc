@@ -21,16 +21,22 @@
 #include "api/test/mock_video_encoder.h"
 #include "api/video/builtin_video_bitrate_allocator_factory.h"
 #include "api/video/i420_buffer.h"
+#include "api/video/video_adaptation_reason.h"
 #include "api/video/video_bitrate_allocation.h"
 #include "api/video_codecs/video_encoder.h"
 #include "api/video_codecs/vp8_temporal_layers.h"
 #include "api/video_codecs/vp8_temporal_layers_factory.h"
+#include "call/adaptation/test/fake_adaptation_constraint.h"
+#include "call/adaptation/test/fake_adaptation_listener.h"
+#include "call/adaptation/test/fake_resource.h"
 #include "common_video/h264/h264_common.h"
 #include "common_video/include/video_frame_buffer.h"
 #include "media/base/video_adapter.h"
 #include "modules/video_coding/codecs/vp9/include/vp9_globals.h"
+#include "modules/video_coding/utility/quality_scaler.h"
 #include "modules/video_coding/utility/simulcast_rate_allocator.h"
 #include "rtc_base/fake_clock.h"
+#include "rtc_base/gunit.h"
 #include "rtc_base/logging.h"
 #include "rtc_base/ref_counted_object.h"
 #include "system_wrappers/include/field_trial.h"
@@ -47,10 +53,14 @@
 
 namespace webrtc {
 
-using ScaleReason = AdaptationObserverInterface::AdaptReason;
 using ::testing::_;
 using ::testing::AllOf;
+using ::testing::Eq;
 using ::testing::Field;
+using ::testing::Ge;
+using ::testing::Gt;
+using ::testing::Le;
+using ::testing::Lt;
 using ::testing::Matcher;
 using ::testing::NiceMock;
 using ::testing::Return;
@@ -123,13 +133,16 @@ class CpuOveruseDetectorProxy : public OveruseFrameDetector {
  public:
   explicit CpuOveruseDetectorProxy(CpuOveruseMetricsObserver* metrics_observer)
       : OveruseFrameDetector(metrics_observer),
-        last_target_framerate_fps_(-1) {}
+        last_target_framerate_fps_(-1),
+        framerate_updated_event_(true /* manual_reset */,
+                                 false /* initially_signaled */) {}
   virtual ~CpuOveruseDetectorProxy() {}
 
   void OnTargetFramerateUpdated(int framerate_fps) override {
     rtc::CritScope cs(&lock_);
     last_target_framerate_fps_ = framerate_fps;
     OveruseFrameDetector::OnTargetFramerateUpdated(framerate_fps);
+    framerate_updated_event_.Set();
   }
 
   int GetLastTargetFramerate() {
@@ -139,10 +152,158 @@ class CpuOveruseDetectorProxy : public OveruseFrameDetector {
 
   CpuOveruseOptions GetOptions() { return options_; }
 
+  rtc::Event* framerate_updated_event() { return &framerate_updated_event_; }
+
  private:
   rtc::CriticalSection lock_;
   int last_target_framerate_fps_ RTC_GUARDED_BY(lock_);
+  rtc::Event framerate_updated_event_;
 };
+
+class FakeQualityScalerQpUsageHandlerCallback
+    : public QualityScalerQpUsageHandlerCallbackInterface {
+ public:
+  FakeQualityScalerQpUsageHandlerCallback()
+      : QualityScalerQpUsageHandlerCallbackInterface(),
+        qp_usage_handled_event_(/*manual_reset=*/true,
+                                /*initially_signaled=*/false),
+        clear_qp_samples_result_(absl::nullopt) {}
+  ~FakeQualityScalerQpUsageHandlerCallback() override {
+    RTC_DCHECK(clear_qp_samples_result_.has_value());
+  }
+
+  void OnQpUsageHandled(bool clear_qp_samples) override {
+    clear_qp_samples_result_ = clear_qp_samples;
+    qp_usage_handled_event_.Set();
+  }
+
+  bool WaitForQpUsageHandled() { return qp_usage_handled_event_.Wait(5000); }
+
+  absl::optional<bool> clear_qp_samples_result() const {
+    return clear_qp_samples_result_;
+  }
+
+ private:
+  rtc::Event qp_usage_handled_event_;
+  absl::optional<bool> clear_qp_samples_result_;
+};
+
+class FakeVideoSourceRestrictionsListener
+    : public VideoSourceRestrictionsListener {
+ public:
+  FakeVideoSourceRestrictionsListener()
+      : was_restrictions_updated_(false), restrictions_updated_event_() {}
+  ~FakeVideoSourceRestrictionsListener() override {
+    RTC_DCHECK(was_restrictions_updated_);
+  }
+
+  rtc::Event* restrictions_updated_event() {
+    return &restrictions_updated_event_;
+  }
+
+  // VideoSourceRestrictionsListener implementation.
+  void OnVideoSourceRestrictionsUpdated(
+      VideoSourceRestrictions restrictions,
+      const VideoAdaptationCounters& adaptation_counters,
+      rtc::scoped_refptr<Resource> reason) override {
+    was_restrictions_updated_ = true;
+    restrictions_updated_event_.Set();
+  }
+
+ private:
+  bool was_restrictions_updated_;
+  rtc::Event restrictions_updated_event_;
+};
+
+auto WantsFps(Matcher<int> fps_matcher) {
+  return Field("max_framerate_fps", &rtc::VideoSinkWants::max_framerate_fps,
+               fps_matcher);
+}
+
+auto WantsMaxPixels(Matcher<int> max_pixel_matcher) {
+  return Field("max_pixel_count", &rtc::VideoSinkWants::max_pixel_count,
+               AllOf(max_pixel_matcher, Gt(0)));
+}
+
+auto ResolutionMax() {
+  return AllOf(
+      WantsMaxPixels(Eq(std::numeric_limits<int>::max())),
+      Field("target_pixel_count", &rtc::VideoSinkWants::target_pixel_count,
+            Eq(absl::nullopt)));
+}
+
+auto FpsMax() {
+  return WantsFps(Eq(kDefaultFramerate));
+}
+
+auto FpsUnlimited() {
+  return WantsFps(Eq(std::numeric_limits<int>::max()));
+}
+
+auto FpsMatchesResolutionMax(Matcher<int> fps_matcher) {
+  return AllOf(WantsFps(fps_matcher), ResolutionMax());
+}
+
+auto FpsMaxResolutionMatches(Matcher<int> pixel_matcher) {
+  return AllOf(FpsMax(), WantsMaxPixels(pixel_matcher));
+}
+
+auto FpsMaxResolutionMax() {
+  return AllOf(FpsMax(), ResolutionMax());
+}
+
+auto UnlimitedSinkWants() {
+  return AllOf(FpsUnlimited(), ResolutionMax());
+}
+
+auto FpsInRangeForPixelsInBalanced(int last_frame_pixels) {
+  Matcher<int> fps_range_matcher;
+
+  if (last_frame_pixels <= 320 * 240) {
+    fps_range_matcher = AllOf(Ge(7), Le(10));
+  } else if (last_frame_pixels <= 480 * 270) {
+    fps_range_matcher = AllOf(Ge(10), Le(15));
+  } else if (last_frame_pixels <= 640 * 480) {
+    fps_range_matcher = Ge(15);
+  } else {
+    fps_range_matcher = Eq(kDefaultFramerate);
+  }
+  return Field("max_framerate_fps", &rtc::VideoSinkWants::max_framerate_fps,
+               fps_range_matcher);
+}
+
+auto FpsEqResolutionEqTo(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(WantsFps(Eq(other_wants.max_framerate_fps)),
+               WantsMaxPixels(Eq(other_wants.max_pixel_count)));
+}
+
+auto FpsMaxResolutionLt(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(FpsMax(), WantsMaxPixels(Lt(other_wants.max_pixel_count)));
+}
+
+auto FpsMaxResolutionGt(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(FpsMax(), WantsMaxPixels(Gt(other_wants.max_pixel_count)));
+}
+
+auto FpsLtResolutionEq(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(WantsFps(Lt(other_wants.max_framerate_fps)),
+               WantsMaxPixels(Eq(other_wants.max_pixel_count)));
+}
+
+auto FpsGtResolutionEq(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(WantsFps(Gt(other_wants.max_framerate_fps)),
+               WantsMaxPixels(Eq(other_wants.max_pixel_count)));
+}
+
+auto FpsEqResolutionLt(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(WantsFps(Eq(other_wants.max_framerate_fps)),
+               WantsMaxPixels(Lt(other_wants.max_pixel_count)));
+}
+
+auto FpsEqResolutionGt(const rtc::VideoSinkWants& other_wants) {
+  return AllOf(WantsFps(Eq(other_wants.max_framerate_fps)),
+               WantsMaxPixels(Gt(other_wants.max_pixel_count)));
+}
 
 class VideoStreamEncoderUnderTest : public VideoStreamEncoder {
  public:
@@ -156,24 +317,55 @@ class VideoStreamEncoderUnderTest : public VideoStreamEncoder {
                            std::unique_ptr<OveruseFrameDetector>(
                                overuse_detector_proxy_ =
                                    new CpuOveruseDetectorProxy(stats_proxy)),
-                           task_queue_factory) {}
-
-  void PostTaskAndWait(bool down,
-                       AdaptationObserverInterface::AdaptReason reason) {
-    PostTaskAndWait(down, reason, /*expected_results=*/true);
+                           task_queue_factory),
+        fake_cpu_resource_(FakeResource::Create("FakeResource[CPU]")),
+        fake_quality_resource_(FakeResource::Create("FakeResource[QP]")),
+        fake_adaptation_constraint_("FakeAdaptationConstraint"),
+        fake_adaptation_listener_() {
+    InjectAdaptationResource(fake_quality_resource_,
+                             VideoAdaptationReason::kQuality);
+    InjectAdaptationResource(fake_cpu_resource_, VideoAdaptationReason::kCpu);
+    InjectAdaptationConstraint(&fake_adaptation_constraint_);
+    InjectAdaptationListener(&fake_adaptation_listener_);
   }
 
-  void PostTaskAndWait(bool down,
-                       AdaptationObserverInterface::AdaptReason reason,
-                       bool expected_results) {
+  void SetSourceAndWaitForRestrictionsUpdated(
+      rtc::VideoSourceInterface<VideoFrame>* source,
+      const DegradationPreference& degradation_preference) {
+    FakeVideoSourceRestrictionsListener listener;
+    AddRestrictionsListenerForTesting(&listener);
+    SetSource(source, degradation_preference);
+    listener.restrictions_updated_event()->Wait(5000);
+    RemoveRestrictionsListenerForTesting(&listener);
+  }
+
+  void SetSourceAndWaitForFramerateUpdated(
+      rtc::VideoSourceInterface<VideoFrame>* source,
+      const DegradationPreference& degradation_preference) {
+    overuse_detector_proxy_->framerate_updated_event()->Reset();
+    SetSource(source, degradation_preference);
+    overuse_detector_proxy_->framerate_updated_event()->Wait(5000);
+  }
+
+  void OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate target_bitrate,
+      DataRate stable_target_bitrate,
+      DataRate link_allocation,
+      uint8_t fraction_lost,
+      int64_t round_trip_time_ms,
+      double cwnd_reduce_ratio) {
+    OnBitrateUpdated(target_bitrate, stable_target_bitrate, link_allocation,
+                     fraction_lost, round_trip_time_ms, cwnd_reduce_ratio);
+    // Bitrate is updated on the encoder queue.
+    WaitUntilTaskQueueIsIdle();
+    // Give the managed resources time to react to the new bitrate.
+    // TODO(hbos): Can we await an appropriate event instead?
+    WaitUntilAdaptationTaskQueueIsIdle();
+  }
+
+  void WaitUntilAdaptationTaskQueueIsIdle() {
     rtc::Event event;
-    encoder_queue()->PostTask([this, &event, reason, down, expected_results] {
-      if (down)
-        EXPECT_EQ(expected_results, OnResourceOveruseForTesting(reason));
-      else
-        OnResourceUnderuseForTesting(reason);
-      event.Set();
-    });
+    resource_adaptation_queue()->PostTask([&event] { event.Set(); });
     ASSERT_TRUE(event.Wait(5000));
   }
 
@@ -185,33 +377,63 @@ class VideoStreamEncoderUnderTest : public VideoStreamEncoder {
     ASSERT_TRUE(event.Wait(5000));
   }
 
+  // Triggers resource usage measurements on the fake CPU resource.
   void TriggerCpuOveruse() {
-    PostTaskAndWait(/*down=*/true,
-                    AdaptationObserverInterface::AdaptReason::kCpu);
+    rtc::Event event;
+    resource_adaptation_queue()->PostTask([this, &event] {
+      fake_cpu_resource_->SetUsageState(ResourceUsageState::kOveruse);
+      event.Set();
+    });
+    ASSERT_TRUE(event.Wait(5000));
+  }
+  void TriggerCpuUnderuse() {
+    rtc::Event event;
+    resource_adaptation_queue()->PostTask([this, &event] {
+      fake_cpu_resource_->SetUsageState(ResourceUsageState::kUnderuse);
+      event.Set();
+    });
+    ASSERT_TRUE(event.Wait(5000));
   }
 
-  void TriggerCpuNormalUsage() {
-    PostTaskAndWait(/*down=*/false,
-                    AdaptationObserverInterface::AdaptReason::kCpu);
-  }
-
+  // Triggers resource usage measurements on the fake quality resource.
   void TriggerQualityLow() {
-    PostTaskAndWait(/*down=*/true,
-                    AdaptationObserverInterface::AdaptReason::kQuality);
+    rtc::Event event;
+    resource_adaptation_queue()->PostTask([this, &event] {
+      fake_quality_resource_->SetUsageState(ResourceUsageState::kOveruse);
+      event.Set();
+    });
+    ASSERT_TRUE(event.Wait(5000));
   }
-
-  void TriggerQualityLowExpectFalse() {
-    PostTaskAndWait(/*down=*/true,
-                    AdaptationObserverInterface::AdaptReason::kQuality,
-                    /*expected_results=*/false);
-  }
-
   void TriggerQualityHigh() {
-    PostTaskAndWait(/*down=*/false,
-                    AdaptationObserverInterface::AdaptReason::kQuality);
+    rtc::Event event;
+    resource_adaptation_queue()->PostTask([this, &event] {
+      fake_quality_resource_->SetUsageState(ResourceUsageState::kUnderuse);
+      event.Set();
+    });
+    ASSERT_TRUE(event.Wait(5000));
+  }
+
+  // Fakes high QP resource usage measurements on the real
+  // QualityScalerResource. Returns whether or not QP samples would have been
+  // cleared if this had been a real signal from the QualityScaler.
+  bool TriggerQualityScalerHighQpAndReturnIfQpSamplesShouldBeCleared() {
+    rtc::scoped_refptr<FakeQualityScalerQpUsageHandlerCallback> callback =
+        new FakeQualityScalerQpUsageHandlerCallback();
+    encoder_queue()->PostTask([this, callback] {
+      // This will cause a "ping" between adaptation task queue and encoder
+      // queue. When we have the result, the |callback| will be notified.
+      quality_scaler_resource_for_testing()->OnReportQpUsageHigh(callback);
+    });
+    EXPECT_TRUE(callback->WaitForQpUsageHandled());
+    EXPECT_TRUE(callback->clear_qp_samples_result().has_value());
+    return callback->clear_qp_samples_result().value();
   }
 
   CpuOveruseDetectorProxy* overuse_detector_proxy_;
+  rtc::scoped_refptr<FakeResource> fake_cpu_resource_;
+  rtc::scoped_refptr<FakeResource> fake_quality_resource_;
+  FakeAdaptationConstraint fake_adaptation_constraint_;
+  FakeAdaptationListener fake_adaptation_listener_;
 };
 
 class VideoStreamFactory
@@ -336,9 +558,9 @@ class AdaptingFrameForwarder : public test::FrameForwarder {
   void AddOrUpdateSink(rtc::VideoSinkInterface<VideoFrame>* sink,
                        const rtc::VideoSinkWants& wants) override {
     rtc::CritScope cs(&crit_);
-    last_wants_ = sink_wants();
+    last_wants_ = sink_wants_locked();
     adapter_.OnSinkWants(wants);
-    test::FrameForwarder::AddOrUpdateSink(sink, wants);
+    test::FrameForwarder::AddOrUpdateSinkLocked(sink, wants);
   }
   cricket::VideoAdapter adapter_;
   bool adaptation_enabled_ RTC_GUARDED_BY(crit_);
@@ -385,16 +607,24 @@ class MockableSendStatisticsProxy : public SendStatisticsProxy {
 
 class MockBitrateObserver : public VideoBitrateAllocationObserver {
  public:
-  MOCK_METHOD1(OnBitrateAllocationUpdated, void(const VideoBitrateAllocation&));
+  MOCK_METHOD(void,
+              OnBitrateAllocationUpdated,
+              (const VideoBitrateAllocation&),
+              (override));
 };
 
 class MockEncoderSelector
     : public VideoEncoderFactory::EncoderSelectorInterface {
  public:
-  MOCK_METHOD1(OnCurrentEncoder, void(const SdpVideoFormat& format));
-  MOCK_METHOD1(OnEncodingBitrate,
-               absl::optional<SdpVideoFormat>(const DataRate& rate));
-  MOCK_METHOD0(OnEncoderBroken, absl::optional<SdpVideoFormat>());
+  MOCK_METHOD(void,
+              OnCurrentEncoder,
+              (const SdpVideoFormat& format),
+              (override));
+  MOCK_METHOD(absl::optional<SdpVideoFormat>,
+              OnAvailableBitrate,
+              (const DataRate& rate),
+              (override));
+  MOCK_METHOD(absl::optional<SdpVideoFormat>, OnEncoderBroken, (), (override));
 };
 
 }  // namespace
@@ -557,111 +787,14 @@ class VideoStreamEncoderTest : public ::testing::Test {
 
     EXPECT_CALL(bitrate_observer, OnBitrateAllocationUpdated(expected_bitrate))
         .Times(1);
-    video_stream_encoder_->OnBitrateUpdated(
-        DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-        DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+    video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+        DataRate::BitsPerSec(kTargetBitrateBps),
+        DataRate::BitsPerSec(kTargetBitrateBps),
+        DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
     video_source_.IncomingCapturedFrame(
         CreateFrame(1, codec_width_, codec_height_));
     WaitForEncodedFrame(1);
-  }
-
-  void VerifyNoLimitation(const rtc::VideoSinkWants& wants) {
-    EXPECT_EQ(std::numeric_limits<int>::max(), wants.max_framerate_fps);
-    EXPECT_EQ(std::numeric_limits<int>::max(), wants.max_pixel_count);
-    EXPECT_FALSE(wants.target_pixel_count);
-  }
-
-  void VerifyFpsEqResolutionEq(const rtc::VideoSinkWants& wants1,
-                               const rtc::VideoSinkWants& wants2) {
-    EXPECT_EQ(wants1.max_framerate_fps, wants2.max_framerate_fps);
-    EXPECT_EQ(wants1.max_pixel_count, wants2.max_pixel_count);
-  }
-
-  void VerifyFpsMaxResolutionMax(const rtc::VideoSinkWants& wants) {
-    EXPECT_EQ(kDefaultFramerate, wants.max_framerate_fps);
-    EXPECT_EQ(std::numeric_limits<int>::max(), wants.max_pixel_count);
-    EXPECT_FALSE(wants.target_pixel_count);
-  }
-
-  void VerifyFpsMaxResolutionLt(const rtc::VideoSinkWants& wants1,
-                                const rtc::VideoSinkWants& wants2) {
-    EXPECT_EQ(kDefaultFramerate, wants1.max_framerate_fps);
-    EXPECT_LT(wants1.max_pixel_count, wants2.max_pixel_count);
-    EXPECT_GT(wants1.max_pixel_count, 0);
-  }
-
-  void VerifyFpsMaxResolutionGt(const rtc::VideoSinkWants& wants1,
-                                const rtc::VideoSinkWants& wants2) {
-    EXPECT_EQ(kDefaultFramerate, wants1.max_framerate_fps);
-    EXPECT_GT(wants1.max_pixel_count, wants2.max_pixel_count);
-  }
-
-  void VerifyFpsMaxResolutionEq(const rtc::VideoSinkWants& wants1,
-                                const rtc::VideoSinkWants& wants2) {
-    EXPECT_EQ(kDefaultFramerate, wants1.max_framerate_fps);
-    EXPECT_EQ(wants1.max_pixel_count, wants2.max_pixel_count);
-  }
-
-  void VerifyFpsLtResolutionEq(const rtc::VideoSinkWants& wants1,
-                               const rtc::VideoSinkWants& wants2) {
-    EXPECT_LT(wants1.max_framerate_fps, wants2.max_framerate_fps);
-    EXPECT_EQ(wants1.max_pixel_count, wants2.max_pixel_count);
-  }
-
-  void VerifyFpsGtResolutionEq(const rtc::VideoSinkWants& wants1,
-                               const rtc::VideoSinkWants& wants2) {
-    EXPECT_GT(wants1.max_framerate_fps, wants2.max_framerate_fps);
-    EXPECT_EQ(wants1.max_pixel_count, wants2.max_pixel_count);
-  }
-
-  void VerifyFpsEqResolutionLt(const rtc::VideoSinkWants& wants1,
-                               const rtc::VideoSinkWants& wants2) {
-    EXPECT_EQ(wants1.max_framerate_fps, wants2.max_framerate_fps);
-    EXPECT_LT(wants1.max_pixel_count, wants2.max_pixel_count);
-    EXPECT_GT(wants1.max_pixel_count, 0);
-  }
-
-  void VerifyFpsEqResolutionGt(const rtc::VideoSinkWants& wants1,
-                               const rtc::VideoSinkWants& wants2) {
-    EXPECT_EQ(wants1.max_framerate_fps, wants2.max_framerate_fps);
-    EXPECT_GT(wants1.max_pixel_count, wants2.max_pixel_count);
-  }
-
-  void VerifyFpsMaxResolutionLt(const rtc::VideoSinkWants& wants,
-                                int pixel_count) {
-    EXPECT_EQ(kDefaultFramerate, wants.max_framerate_fps);
-    EXPECT_LT(wants.max_pixel_count, pixel_count);
-    EXPECT_GT(wants.max_pixel_count, 0);
-  }
-
-  void VerifyFpsLtResolutionMax(const rtc::VideoSinkWants& wants, int fps) {
-    EXPECT_LT(wants.max_framerate_fps, fps);
-    EXPECT_EQ(std::numeric_limits<int>::max(), wants.max_pixel_count);
-    EXPECT_FALSE(wants.target_pixel_count);
-  }
-
-  void VerifyFpsEqResolutionMax(const rtc::VideoSinkWants& wants,
-                                int expected_fps) {
-    EXPECT_EQ(expected_fps, wants.max_framerate_fps);
-    EXPECT_EQ(std::numeric_limits<int>::max(), wants.max_pixel_count);
-    EXPECT_FALSE(wants.target_pixel_count);
-  }
-
-  void VerifyBalancedModeFpsRange(const rtc::VideoSinkWants& wants,
-                                  int last_frame_pixels) {
-    // Balanced mode should always scale FPS to the desired range before
-    // attempting to scale resolution.
-    int fps_limit = wants.max_framerate_fps;
-    if (last_frame_pixels <= 320 * 240) {
-      EXPECT_TRUE(7 <= fps_limit && fps_limit <= 10);
-    } else if (last_frame_pixels <= 480 * 270) {
-      EXPECT_TRUE(10 <= fps_limit && fps_limit <= 15);
-    } else if (last_frame_pixels <= 640 * 480) {
-      EXPECT_LE(15, fps_limit);
-    } else {
-      EXPECT_EQ(kDefaultFramerate, fps_limit);
-    }
   }
 
   void WaitForEncodedFrame(int64_t expected_ntp_time) {
@@ -958,7 +1091,7 @@ class VideoStreamEncoderTest : public ::testing::Test {
     bool expect_null_frame_ = false;
     EncodedImageCallback* encoded_image_callback_
         RTC_GUARDED_BY(local_crit_sect_) = nullptr;
-    MockFecControllerOverride fec_controller_override_;
+    NiceMock<MockFecControllerOverride> fec_controller_override_;
     int num_encoder_initializations_ RTC_GUARDED_BY(local_crit_sect_) = 0;
     std::vector<ResolutionBitrateLimits> resolution_bitrate_limits_
         RTC_GUARDED_BY(local_crit_sect_);
@@ -1100,6 +1233,7 @@ class VideoStreamEncoderTest : public ::testing::Test {
 
     void OnEncoderConfigurationChanged(
         std::vector<VideoStream> streams,
+        bool is_svc,
         VideoEncoderConfig::ContentType content_type,
         int min_transmit_bitrate_bps) override {
       rtc::CritScope lock(&crit_);
@@ -1167,9 +1301,10 @@ class VideoStreamEncoderTest : public ::testing::Test {
 };
 
 TEST_F(VideoStreamEncoderTest, EncodeOneFrame) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   rtc::Event frame_destroyed_event;
   video_source_.IncomingCapturedFrame(CreateFrame(1, &frame_destroyed_event));
   WaitForEncodedFrame(1);
@@ -1187,9 +1322,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesBeforeFirstOnBitrateUpdated) {
   video_source_.IncomingCapturedFrame(CreateFrame(2, nullptr));
   EXPECT_TRUE(frame_destroyed_event.Wait(kDefaultTimeoutMs));
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // The pending frame should be received.
   WaitForEncodedFrame(2);
@@ -1200,23 +1336,26 @@ TEST_F(VideoStreamEncoderTest, DropsFramesBeforeFirstOnBitrateUpdated) {
 }
 
 TEST_F(VideoStreamEncoderTest, DropsFramesWhenRateSetToZero) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
   WaitForEncodedFrame(1);
 
-  video_stream_encoder_->OnBitrateUpdated(DataRate::bps(0), DataRate::bps(0),
-                                          DataRate::bps(0), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(0), DataRate::BitsPerSec(0), DataRate::BitsPerSec(0),
+      0, 0, 0);
   // The encoder will cache up to one frame for a short duration. Adding two
   // frames means that the first frame will be dropped and the second frame will
   // be sent when the encoder is resumed.
   video_source_.IncomingCapturedFrame(CreateFrame(2, nullptr));
   video_source_.IncomingCapturedFrame(CreateFrame(3, nullptr));
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   WaitForEncodedFrame(3);
   video_source_.IncomingCapturedFrame(CreateFrame(4, nullptr));
   WaitForEncodedFrame(4);
@@ -1224,9 +1363,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesWhenRateSetToZero) {
 }
 
 TEST_F(VideoStreamEncoderTest, DropsFramesWithSameOrOldNtpTimestamp) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
   WaitForEncodedFrame(1);
 
@@ -1239,9 +1379,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesWithSameOrOldNtpTimestamp) {
 }
 
 TEST_F(VideoStreamEncoderTest, DropsFrameAfterStop) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
   WaitForEncodedFrame(1);
@@ -1254,9 +1395,10 @@ TEST_F(VideoStreamEncoderTest, DropsFrameAfterStop) {
 }
 
 TEST_F(VideoStreamEncoderTest, DropsPendingFramesOnSlowEncode) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   fake_encoder_.BlockNextEncode();
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
@@ -1272,9 +1414,10 @@ TEST_F(VideoStreamEncoderTest, DropsPendingFramesOnSlowEncode) {
 }
 
 TEST_F(VideoStreamEncoderTest, DropFrameWithFailedI420Conversion) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   rtc::Event frame_destroyed_event;
   video_source_.IncomingCapturedFrame(
@@ -1293,9 +1436,10 @@ TEST_F(VideoStreamEncoderTest, DropFrameWithFailedI420ConversionWithCrop) {
   video_stream_encoder_->WaitUntilTaskQueueIsIdle();
 
   // Capture a frame at codec_width_/codec_height_.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
   WaitForEncodedFrame(1);
   // The encoder will have been configured once.
@@ -1314,15 +1458,17 @@ TEST_F(VideoStreamEncoderTest, DropFrameWithFailedI420ConversionWithCrop) {
 }
 
 TEST_F(VideoStreamEncoderTest, DropsFramesWhenCongestionWindowPushbackSet) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
   WaitForEncodedFrame(1);
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0.5);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0.5);
   // The congestion window pushback is set to 0.5, which will drop 1/2 of
   // frames. Adding two frames means that the first frame will be dropped and
   // the second frame will be sent to the encoder.
@@ -1338,9 +1484,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesWhenCongestionWindowPushbackSet) {
 
 TEST_F(VideoStreamEncoderTest,
        ConfigureEncoderTriggersOnEncoderConfigurationChanged) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   EXPECT_EQ(0, sink_.number_of_reconfigurations());
 
   // Capture a frame and wait for it to synchronize with the encoder thread.
@@ -1366,9 +1513,10 @@ TEST_F(VideoStreamEncoderTest,
 }
 
 TEST_F(VideoStreamEncoderTest, FrameResolutionChangeReconfigureEncoder) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Capture a frame and wait for it to synchronize with the encoder thread.
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
@@ -1393,9 +1541,10 @@ TEST_F(VideoStreamEncoderTest, FrameResolutionChangeReconfigureEncoder) {
 
 TEST_F(VideoStreamEncoderTest,
        EncoderInstanceDestroyedBeforeAnotherInstanceCreated) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Capture a frame and wait for it to synchronize with the encoder thread.
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
@@ -1416,9 +1565,10 @@ TEST_F(VideoStreamEncoderTest,
 }
 
 TEST_F(VideoStreamEncoderTest, BitrateLimitsChangeReconfigureRateAllocator) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   VideoEncoderConfig video_encoder_config;
   test::FillEncoderConfiguration(kVideoCodecVP8, 1, &video_encoder_config);
@@ -1462,9 +1612,10 @@ TEST_F(VideoStreamEncoderTest, BitrateLimitsChangeReconfigureRateAllocator) {
 
 TEST_F(VideoStreamEncoderTest,
        IntersectionOfEncoderAndAppBitrateLimitsUsedWhenBothProvided) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const uint32_t kMinEncBitrateKbps = 100;
   const uint32_t kMaxEncBitrateKbps = 1000;
@@ -1509,9 +1660,10 @@ TEST_F(VideoStreamEncoderTest,
 
 TEST_F(VideoStreamEncoderTest,
        EncoderAndAppLimitsDontIntersectEncoderLimitsIgnored) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const uint32_t kMinAppBitrateKbps = 100;
   const uint32_t kMaxAppBitrateKbps = 200;
@@ -1544,9 +1696,10 @@ TEST_F(VideoStreamEncoderTest,
 
 TEST_F(VideoStreamEncoderTest,
        EncoderRecommendedMaxAndMinBitratesUsedForGivenResolution) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const VideoEncoder::ResolutionBitrateLimits encoder_bitrate_limits_270p(
       480 * 270, 34 * 1000, 12 * 1000, 1234 * 1000);
@@ -1613,9 +1766,10 @@ TEST_F(VideoStreamEncoderTest,
 }
 
 TEST_F(VideoStreamEncoderTest, EncoderRecommendedMaxBitrateCapsTargetBitrate) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   VideoEncoderConfig video_encoder_config;
   test::FillEncoderConfiguration(kVideoCodecVP8, 1, &video_encoder_config);
@@ -1678,9 +1832,10 @@ TEST_F(VideoStreamEncoderTest, SinkWantsResolutionAlignment) {
   constexpr int kRequestedResolutionAlignment = 7;
   video_source_.set_adaptation_enabled(true);
   fake_encoder_.SetRequestedResolutionAlignment(kRequestedResolutionAlignment);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // On the 1st frame, we should have initialized the encoder and
   // asked for its resolution requirements.
@@ -1711,12 +1866,13 @@ TEST_F(VideoStreamEncoderTest, TestCpuDowngrades_BalancedMode) {
   video_source_.set_adaptation_enabled(true);
 
   // Enable BALANCED preference, no initial limitation.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_stream_encoder_->SetSource(&video_source_,
                                    webrtc::DegradationPreference::BALANCED);
-  VerifyNoLimitation(video_source_.sink_wants());
+  EXPECT_THAT(video_source_.sink_wants(), UnlimitedSinkWants());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -1741,9 +1897,10 @@ TEST_F(VideoStreamEncoderTest, TestCpuDowngrades_BalancedMode) {
     t += frame_interval_ms;
 
     video_stream_encoder_->TriggerCpuOveruse();
-    VerifyBalancedModeFpsRange(
+    EXPECT_THAT(
         video_source_.sink_wants(),
-        *video_source_.last_sent_width() * *video_source_.last_sent_height());
+        FpsInRangeForPixelsInBalanced(*video_source_.last_sent_width() *
+                                      *video_source_.last_sent_height()));
   } while (video_source_.sink_wants().max_pixel_count <
                last_wants.max_pixel_count ||
            video_source_.sink_wants().max_framerate_fps <
@@ -1775,17 +1932,18 @@ TEST_F(VideoStreamEncoderTest, TestCpuDowngrades_BalancedMode) {
     sink_.WaitForEncodedFrame(t);
     t += frame_interval_ms;
 
-    video_stream_encoder_->TriggerCpuNormalUsage();
-    VerifyBalancedModeFpsRange(
+    video_stream_encoder_->TriggerCpuUnderuse();
+    EXPECT_THAT(
         video_source_.sink_wants(),
-        *video_source_.last_sent_width() * *video_source_.last_sent_height());
+        FpsInRangeForPixelsInBalanced(*video_source_.last_sent_width() *
+                                      *video_source_.last_sent_height()));
     EXPECT_TRUE(video_source_.sink_wants().max_pixel_count >
                     last_wants.max_pixel_count ||
                 video_source_.sink_wants().max_framerate_fps >
                     last_wants.max_framerate_fps);
   }
 
-  VerifyFpsMaxResolutionMax(video_source_.sink_wants());
+  EXPECT_THAT(video_source_.sink_wants(), FpsMaxResolutionMax());
   stats_proxy_->ResetMockStats();
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
@@ -1795,11 +1953,125 @@ TEST_F(VideoStreamEncoderTest, TestCpuDowngrades_BalancedMode) {
   video_stream_encoder_->Stop();
 }
 
-TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
+TEST_F(VideoStreamEncoderTest,
+       SinkWantsNotChangedByResourceLimitedBeforeDegradationPreferenceChange) {
   video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
-  VerifyNoLimitation(video_source_.sink_wants());
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
+  EXPECT_THAT(video_source_.sink_wants(), UnlimitedSinkWants());
+
+  const int kFrameWidth = 1280;
+  const int kFrameHeight = 720;
+
+  int64_t ntp_time = kFrameIntervalMs;
+
+  // Force an input frame rate to be available, or the adaptation call won't
+  // know what framerate to adapt form.
+  const int kInputFps = 30;
+  VideoSendStream::Stats stats = stats_proxy_->GetStats();
+  stats.input_frame_rate = kInputFps;
+  stats_proxy_->SetMockStats(stats);
+
+  video_source_.set_adaptation_enabled(true);
+  video_stream_encoder_->SetSource(
+      &video_source_, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
+  EXPECT_THAT(video_source_.sink_wants(), UnlimitedSinkWants());
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+
+  // Trigger CPU overuse.
+  video_stream_encoder_->TriggerCpuOveruse();
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+
+  EXPECT_FALSE(video_source_.sink_wants().target_pixel_count);
+  EXPECT_EQ(std::numeric_limits<int>::max(),
+            video_source_.sink_wants().max_pixel_count);
+  // Some framerate constraint should be set.
+  int restricted_fps = video_source_.sink_wants().max_framerate_fps;
+  EXPECT_LT(restricted_fps, kInputFps);
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += 100;
+
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
+      &video_source_, webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
+  // Give the encoder queue time to process the change in degradation preference
+  // by waiting for an encoded frame.
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+
+  video_stream_encoder_->TriggerQualityLow();
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+
+  // Some resolution constraint should be set.
+  EXPECT_FALSE(video_source_.sink_wants().target_pixel_count);
+  EXPECT_LT(video_source_.sink_wants().max_pixel_count,
+            kFrameWidth * kFrameHeight);
+  EXPECT_EQ(video_source_.sink_wants().max_framerate_fps, kInputFps);
+
+  int pixel_count = video_source_.sink_wants().max_pixel_count;
+  // Triggering a CPU underuse should not change the sink wants since it has
+  // not been overused for resolution since we changed degradation preference.
+  video_stream_encoder_->TriggerCpuUnderuse();
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+  EXPECT_EQ(video_source_.sink_wants().max_pixel_count, pixel_count);
+  EXPECT_EQ(video_source_.sink_wants().max_framerate_fps, kInputFps);
+
+  // Change the degradation preference back. CPU underuse should not adapt since
+  // QP is most limited.
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
+      &video_source_, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += 100;
+  // Resolution adaptations is gone after changing degradation preference.
+  EXPECT_FALSE(video_source_.sink_wants().target_pixel_count);
+  EXPECT_EQ(std::numeric_limits<int>::max(),
+            video_source_.sink_wants().max_pixel_count);
+  // The fps adaptation from above is now back.
+  EXPECT_EQ(video_source_.sink_wants().max_framerate_fps, restricted_fps);
+
+  // Trigger CPU underuse.
+  video_stream_encoder_->TriggerCpuUnderuse();
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+  EXPECT_EQ(video_source_.sink_wants().max_framerate_fps, restricted_fps);
+
+  // Trigger QP underuse, fps should return to normal.
+  video_stream_encoder_->TriggerQualityHigh();
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(ntp_time, kFrameWidth, kFrameHeight));
+  sink_.WaitForEncodedFrame(ntp_time);
+  ntp_time += kFrameIntervalMs;
+  EXPECT_THAT(video_source_.sink_wants(), FpsMax());
+
+  video_stream_encoder_->Stop();
+}
+
+TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
+  EXPECT_THAT(video_source_.sink_wants(), UnlimitedSinkWants());
 
   const int kFrameWidth = 1280;
   const int kFrameHeight = 720;
@@ -1827,7 +2099,7 @@ TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
 
   // Set new source, switch to maintain-resolution.
   test::FrameForwarder new_video_source;
-  video_stream_encoder_->SetSource(
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
       &new_video_source, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
   // Give the encoder queue time to process the change in degradation preference
   // by waiting for an encoded frame.
@@ -1836,7 +2108,7 @@ TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
   sink_.WaitForEncodedFrame(frame_timestamp);
   frame_timestamp += kFrameIntervalMs;
   // Initially no degradation registered.
-  VerifyFpsMaxResolutionMax(new_video_source.sink_wants());
+  EXPECT_THAT(new_video_source.sink_wants(), FpsMaxResolutionMax());
 
   // Force an input frame rate to be available, or the adaptation call won't
   // know what framerate to adapt form.
@@ -1858,15 +2130,15 @@ TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
   EXPECT_LT(new_video_source.sink_wants().max_framerate_fps, kInputFps);
 
   // Turn off degradation completely.
-  video_stream_encoder_->SetSource(&new_video_source,
-                                   webrtc::DegradationPreference::DISABLED);
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
+      &new_video_source, webrtc::DegradationPreference::DISABLED);
   // Give the encoder queue time to process the change in degradation preference
   // by waiting for an encoded frame.
   new_video_source.IncomingCapturedFrame(
       CreateFrame(frame_timestamp, kFrameWidth, kFrameWidth));
   sink_.WaitForEncodedFrame(frame_timestamp);
   frame_timestamp += kFrameIntervalMs;
-  VerifyFpsMaxResolutionMax(new_video_source.sink_wants());
+  EXPECT_THAT(new_video_source.sink_wants(), FpsMaxResolutionMax());
 
   video_stream_encoder_->TriggerCpuOveruse();
   new_video_source.IncomingCapturedFrame(
@@ -1875,10 +2147,10 @@ TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
   frame_timestamp += kFrameIntervalMs;
 
   // Still no degradation.
-  VerifyFpsMaxResolutionMax(new_video_source.sink_wants());
+  EXPECT_THAT(new_video_source.sink_wants(), FpsMaxResolutionMax());
 
   // Calling SetSource with resolution scaling enabled apply the old SinkWants.
-  video_stream_encoder_->SetSource(
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
       &new_video_source, webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
   // Give the encoder queue time to process the change in degradation preference
   // by waiting for an encoded frame.
@@ -1892,7 +2164,7 @@ TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
   EXPECT_EQ(kDefaultFramerate, new_video_source.sink_wants().max_framerate_fps);
 
   // Calling SetSource with framerate scaling enabled apply the old SinkWants.
-  video_stream_encoder_->SetSource(
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
       &new_video_source, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
   // Give the encoder queue time to process the change in degradation preference
   // by waiting for an encoded frame.
@@ -1909,9 +2181,10 @@ TEST_F(VideoStreamEncoderTest, SinkWantsStoredByDegradationPreference) {
 }
 
 TEST_F(VideoStreamEncoderTest, StatsTracksQualityAdaptationStats) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kWidth = 1280;
   const int kHeight = 720;
@@ -1944,9 +2217,10 @@ TEST_F(VideoStreamEncoderTest, StatsTracksQualityAdaptationStats) {
 }
 
 TEST_F(VideoStreamEncoderTest, StatsTracksCpuAdaptationStats) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kWidth = 1280;
   const int kHeight = 720;
@@ -1966,7 +2240,7 @@ TEST_F(VideoStreamEncoderTest, StatsTracksCpuAdaptationStats) {
   EXPECT_EQ(1, stats.number_of_cpu_adapt_changes);
 
   // Trigger CPU normal use.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   video_source_.IncomingCapturedFrame(CreateFrame(3, kWidth, kHeight));
   WaitForEncodedFrame(3);
 
@@ -1979,9 +2253,10 @@ TEST_F(VideoStreamEncoderTest, StatsTracksCpuAdaptationStats) {
 }
 
 TEST_F(VideoStreamEncoderTest, SwitchingSourceKeepsCpuAdaptation) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kWidth = 1280;
   const int kHeight = 720;
@@ -2036,7 +2311,7 @@ TEST_F(VideoStreamEncoderTest, SwitchingSourceKeepsCpuAdaptation) {
   EXPECT_EQ(1, stats.number_of_cpu_adapt_changes);
 
   // Trigger CPU normal use.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   new_video_source.IncomingCapturedFrame(CreateFrame(6, kWidth, kHeight));
   WaitForEncodedFrame(6);
   stats = stats_proxy_->GetStats();
@@ -2049,9 +2324,10 @@ TEST_F(VideoStreamEncoderTest, SwitchingSourceKeepsCpuAdaptation) {
 }
 
 TEST_F(VideoStreamEncoderTest, SwitchingSourceKeepsQualityAdaptation) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kWidth = 1280;
   const int kHeight = 720;
@@ -2111,9 +2387,10 @@ TEST_F(VideoStreamEncoderTest, SwitchingSourceKeepsQualityAdaptation) {
 
 TEST_F(VideoStreamEncoderTest,
        QualityAdaptationStatsAreResetWhenScalerIsDisabled) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kWidth = 1280;
   const int kHeight = 720;
@@ -2167,10 +2444,78 @@ TEST_F(VideoStreamEncoderTest,
 }
 
 TEST_F(VideoStreamEncoderTest,
+       StatsTracksCpuAdaptationStatsWhenSwitchingSource_Balanced) {
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
+
+  const int kWidth = 1280;
+  const int kHeight = 720;
+  int sequence = 1;
+
+  // Enable BALANCED preference, no initial limitation.
+  test::FrameForwarder source;
+  video_stream_encoder_->SetSource(&source,
+                                   webrtc::DegradationPreference::BALANCED);
+  source.IncomingCapturedFrame(CreateFrame(sequence, kWidth, kHeight));
+  WaitForEncodedFrame(sequence++);
+  VideoSendStream::Stats stats = stats_proxy_->GetStats();
+  EXPECT_FALSE(stats.cpu_limited_resolution);
+  EXPECT_FALSE(stats.cpu_limited_framerate);
+  EXPECT_EQ(0, stats.number_of_cpu_adapt_changes);
+
+  // Trigger CPU overuse, should now adapt down.
+  video_stream_encoder_->TriggerCpuOveruse();
+  source.IncomingCapturedFrame(CreateFrame(sequence, kWidth, kHeight));
+  WaitForEncodedFrame(sequence++);
+  stats = stats_proxy_->GetStats();
+  EXPECT_EQ(1, stats.number_of_cpu_adapt_changes);
+
+  // Set new degradation preference should clear restrictions since we changed
+  // from BALANCED.
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
+      &source, webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
+  source.IncomingCapturedFrame(CreateFrame(sequence, kWidth, kHeight));
+  WaitForEncodedFrame(sequence++);
+  stats = stats_proxy_->GetStats();
+  EXPECT_FALSE(stats.cpu_limited_resolution);
+  EXPECT_FALSE(stats.cpu_limited_framerate);
+  EXPECT_EQ(1, stats.number_of_cpu_adapt_changes);
+
+  // Force an input frame rate to be available, or the adaptation call won't
+  // know what framerate to adapt from.
+  VideoSendStream::Stats mock_stats = stats_proxy_->GetStats();
+  mock_stats.input_frame_rate = 30;
+  stats_proxy_->SetMockStats(mock_stats);
+  video_stream_encoder_->TriggerCpuOveruse();
+  stats_proxy_->ResetMockStats();
+  source.IncomingCapturedFrame(CreateFrame(sequence, kWidth, kHeight));
+  WaitForEncodedFrame(sequence++);
+
+  // We have now adapted once.
+  stats = stats_proxy_->GetStats();
+  EXPECT_EQ(2, stats.number_of_cpu_adapt_changes);
+
+  // Back to BALANCED, should clear the restrictions again.
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
+      &source, webrtc::DegradationPreference::BALANCED);
+  source.IncomingCapturedFrame(CreateFrame(sequence, kWidth, kHeight));
+  WaitForEncodedFrame(sequence++);
+  stats = stats_proxy_->GetStats();
+  EXPECT_FALSE(stats.cpu_limited_resolution);
+  EXPECT_FALSE(stats.cpu_limited_framerate);
+  EXPECT_EQ(2, stats.number_of_cpu_adapt_changes);
+
+  video_stream_encoder_->Stop();
+}
+
+TEST_F(VideoStreamEncoderTest,
        StatsTracksCpuAdaptationStatsWhenSwitchingSource) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kWidth = 1280;
   const int kHeight = 720;
@@ -2268,7 +2613,7 @@ TEST_F(VideoStreamEncoderTest,
   EXPECT_EQ(2, stats.number_of_cpu_adapt_changes);
 
   // Trigger CPU normal usage.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   video_source_.IncomingCapturedFrame(CreateFrame(sequence, kWidth, kHeight));
   WaitForEncodedFrame(sequence++);
   stats = stats_proxy_->GetStats();
@@ -2289,7 +2634,7 @@ TEST_F(VideoStreamEncoderTest,
   EXPECT_EQ(3, stats.number_of_cpu_adapt_changes);
 
   // Trigger CPU normal usage.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   new_video_source.IncomingCapturedFrame(
       CreateFrame(sequence, kWidth, kHeight));
   WaitForEncodedFrame(sequence++);
@@ -2306,12 +2651,13 @@ TEST_F(VideoStreamEncoderTest,
        ScalingUpAndDownDoesNothingWithMaintainResolution) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Expect no scaling to begin with.
-  VerifyNoLimitation(video_source_.sink_wants());
+  EXPECT_THAT(video_source_.sink_wants(), UnlimitedSinkWants());
 
   video_source_.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   WaitForEncodedFrame(1);
@@ -2356,9 +2702,10 @@ TEST_F(VideoStreamEncoderTest,
        SkipsSameAdaptDownRequest_MaintainFramerateMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   test::FrameForwarder source;
@@ -2367,13 +2714,14 @@ TEST_F(VideoStreamEncoderTest,
 
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   WaitForEncodedFrame(1);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
   // Trigger adapt down, expect scaled down resolution.
   video_stream_encoder_->TriggerCpuOveruse();
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   const int kLastMaxPixelCount = source.sink_wants().max_pixel_count;
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -2390,9 +2738,10 @@ TEST_F(VideoStreamEncoderTest,
 TEST_F(VideoStreamEncoderTest, SkipsSameOrLargerAdaptDownRequest_BalancedMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   test::FrameForwarder source;
@@ -2400,11 +2749,12 @@ TEST_F(VideoStreamEncoderTest, SkipsSameOrLargerAdaptDownRequest_BalancedMode) {
                                    webrtc::DegradationPreference::BALANCED);
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   sink_.WaitForEncodedFrame(1);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
 
   // Trigger adapt down, expect scaled down resolution.
   video_stream_encoder_->TriggerQualityLow();
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
   const int kLastMaxPixelCount = source.sink_wants().max_pixel_count;
@@ -2432,9 +2782,10 @@ TEST_F(VideoStreamEncoderTest,
        NoChangeForInitialNormalUsage_MaintainFramerateMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   test::FrameForwarder source;
@@ -2443,13 +2794,13 @@ TEST_F(VideoStreamEncoderTest,
 
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
   // Trigger adapt up, expect no change.
-  video_stream_encoder_->TriggerCpuNormalUsage();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  video_stream_encoder_->TriggerCpuUnderuse();
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
@@ -2460,9 +2811,10 @@ TEST_F(VideoStreamEncoderTest,
        NoChangeForInitialNormalUsage_MaintainResolutionMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_RESOLUTION preference, no initial limitation.
   test::FrameForwarder source;
@@ -2471,13 +2823,13 @@ TEST_F(VideoStreamEncoderTest,
 
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
   // Trigger adapt up, expect no change.
-  video_stream_encoder_->TriggerCpuNormalUsage();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  video_stream_encoder_->TriggerCpuUnderuse();
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
@@ -2487,9 +2839,10 @@ TEST_F(VideoStreamEncoderTest,
 TEST_F(VideoStreamEncoderTest, NoChangeForInitialNormalUsage_BalancedMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   test::FrameForwarder source;
@@ -2498,14 +2851,14 @@ TEST_F(VideoStreamEncoderTest, NoChangeForInitialNormalUsage_BalancedMode) {
 
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   sink_.WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no change.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -2516,9 +2869,10 @@ TEST_F(VideoStreamEncoderTest, NoChangeForInitialNormalUsage_BalancedMode) {
 TEST_F(VideoStreamEncoderTest, NoChangeForInitialNormalUsage_DisabledMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable DISABLED preference, no initial limitation.
   test::FrameForwarder source;
@@ -2527,14 +2881,14 @@ TEST_F(VideoStreamEncoderTest, NoChangeForInitialNormalUsage_DisabledMode) {
 
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   sink_.WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no change.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -2546,9 +2900,10 @@ TEST_F(VideoStreamEncoderTest,
        AdaptsResolutionForLowQuality_MaintainFramerateMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -2558,7 +2913,7 @@ TEST_F(VideoStreamEncoderTest,
 
   source.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   WaitForEncodedFrame(1);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -2566,13 +2921,14 @@ TEST_F(VideoStreamEncoderTest,
   video_stream_encoder_->TriggerQualityLow();
   source.IncomingCapturedFrame(CreateFrame(2, kWidth, kHeight));
   WaitForEncodedFrame(2);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no restriction.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -2585,9 +2941,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kWidth = 1280;
   const int kHeight = 720;
   const int kInputFps = 30;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   VideoSendStream::Stats stats = stats_proxy_->GetStats();
   stats.input_frame_rate = kInputFps;
@@ -2596,33 +2953,35 @@ TEST_F(VideoStreamEncoderTest,
   // Expect no scaling to begin with (preference: MAINTAIN_FRAMERATE).
   video_source_.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   sink_.WaitForEncodedFrame(1);
-  VerifyFpsMaxResolutionMax(video_source_.sink_wants());
+  EXPECT_THAT(video_source_.sink_wants(), FpsMaxResolutionMax());
 
   // Trigger adapt down, expect scaled down resolution.
   video_stream_encoder_->TriggerQualityLow();
   video_source_.IncomingCapturedFrame(CreateFrame(2, kWidth, kHeight));
   sink_.WaitForEncodedFrame(2);
-  VerifyFpsMaxResolutionLt(video_source_.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(video_source_.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
 
   // Enable MAINTAIN_RESOLUTION preference.
   test::FrameForwarder new_video_source;
-  video_stream_encoder_->SetSource(
+  video_stream_encoder_->SetSourceAndWaitForRestrictionsUpdated(
       &new_video_source, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
   // Give the encoder queue time to process the change in degradation preference
   // by waiting for an encoded frame.
   new_video_source.IncomingCapturedFrame(CreateFrame(3, kWidth, kHeight));
   sink_.WaitForEncodedFrame(3);
-  VerifyFpsMaxResolutionMax(new_video_source.sink_wants());
+  EXPECT_THAT(new_video_source.sink_wants(), FpsMaxResolutionMax());
 
   // Trigger adapt down, expect reduced framerate.
   video_stream_encoder_->TriggerQualityLow();
   new_video_source.IncomingCapturedFrame(CreateFrame(4, kWidth, kHeight));
   sink_.WaitForEncodedFrame(4);
-  VerifyFpsLtResolutionMax(new_video_source.sink_wants(), kInputFps);
+  EXPECT_THAT(new_video_source.sink_wants(),
+              FpsMatchesResolutionMax(Lt(kInputFps)));
 
   // Trigger adapt up, expect no restriction.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(new_video_source.sink_wants());
+  EXPECT_THAT(new_video_source.sink_wants(), FpsMaxResolutionMax());
 
   video_stream_encoder_->Stop();
 }
@@ -2632,9 +2991,10 @@ TEST_F(VideoStreamEncoderTest, DoesNotScaleBelowSetResolutionLimit) {
   const int kHeight = 720;
   const size_t kNumFrames = 10;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable adapter, expected input resolutions when downscaling:
   // 1280x720 -> 960x540 -> 640x360 -> 480x270 -> 320x180 (kMinPixelsPerFrame)
@@ -2669,9 +3029,10 @@ TEST_F(VideoStreamEncoderTest,
        AdaptsResolutionUpAndDownTwiceOnOveruse_MaintainFramerateMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -2682,7 +3043,7 @@ TEST_F(VideoStreamEncoderTest,
   int64_t timestamp_ms = kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
@@ -2691,16 +3052,17 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
   // Trigger adapt up, expect no restriction.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
@@ -2709,16 +3071,17 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
   // Trigger adapt up, expect no restriction.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   sink_.WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
@@ -2729,9 +3092,10 @@ TEST_F(VideoStreamEncoderTest,
        AdaptsResolutionUpAndDownTwiceForLowQuality_BalancedMode_NoFpsLimit) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -2742,7 +3106,7 @@ TEST_F(VideoStreamEncoderTest,
   int64_t timestamp_ms = kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   sink_.WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -2751,7 +3115,8 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   sink_.WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -2760,7 +3125,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   sink_.WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -2769,7 +3134,8 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   sink_.WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -2778,7 +3144,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   sink_.WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -2789,10 +3155,11 @@ TEST_F(VideoStreamEncoderTest, AdaptUpIfBwEstimateIsHigherThanMinBitrate) {
   fake_encoder_.SetResolutionBitrateLimits(
       {kEncoderBitrateLimits540p, kEncoderBitrateLimits720p});
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kEncoderBitrateLimits720p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits720p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits720p.min_start_bitrate_bps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kEncoderBitrateLimits720p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits720p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits720p.min_start_bitrate_bps), 0,
+      0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -2806,10 +3173,11 @@ TEST_F(VideoStreamEncoderTest, AdaptUpIfBwEstimateIsHigherThanMinBitrate) {
   WaitForEncodedFrame(1280, 720);
 
   // Reduce bitrate and trigger adapt down.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kEncoderBitrateLimits540p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits540p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits540p.min_start_bitrate_bps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kEncoderBitrateLimits540p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits540p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits540p.min_start_bitrate_bps), 0,
+      0, 0);
   video_stream_encoder_->TriggerQualityLow();
 
   // Insert 720p frame. It should be downscaled and encoded.
@@ -2820,17 +3188,18 @@ TEST_F(VideoStreamEncoderTest, AdaptUpIfBwEstimateIsHigherThanMinBitrate) {
   // Trigger adapt up. Higher resolution should not be requested duo to lack
   // of bitrate.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionLt(source.sink_wants(), 1280 * 720);
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMatches(Lt(1280 * 720)));
 
   // Increase bitrate.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kEncoderBitrateLimits720p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits720p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits720p.min_start_bitrate_bps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kEncoderBitrateLimits720p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits720p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits720p.min_start_bitrate_bps), 0,
+      0, 0);
 
   // Trigger adapt up. Higher resolution should be requested.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
 
   video_stream_encoder_->Stop();
 }
@@ -2840,10 +3209,11 @@ TEST_F(VideoStreamEncoderTest, DropFirstFramesIfBwEstimateIsTooLow) {
       {kEncoderBitrateLimits540p, kEncoderBitrateLimits720p});
 
   // Set bitrate equal to min bitrate of 540p.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kEncoderBitrateLimits540p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits540p.min_start_bitrate_bps),
-      DataRate::bps(kEncoderBitrateLimits540p.min_start_bitrate_bps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kEncoderBitrateLimits540p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits540p.min_start_bitrate_bps),
+      DataRate::BitsPerSec(kEncoderBitrateLimits540p.min_start_bitrate_bps), 0,
+      0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -2856,7 +3226,7 @@ TEST_F(VideoStreamEncoderTest, DropFirstFramesIfBwEstimateIsTooLow) {
   int64_t timestamp_ms = kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, 1280, 720));
   ExpectDroppedFrame();
-  VerifyFpsMaxResolutionLt(source.sink_wants(), 1280 * 720);
+  EXPECT_TRUE_WAIT(source.sink_wants().max_pixel_count < 1280 * 720, 5000);
 
   // Insert 720p frame. It should be downscaled and encoded.
   timestamp_ms += kFrameIntervalMs;
@@ -2879,9 +3249,9 @@ class BalancedDegradationTest : public VideoStreamEncoderTest {
   }
 
   void OnBitrateUpdated(int bitrate_bps) {
-    video_stream_encoder_->OnBitrateUpdated(
-        DataRate::bps(bitrate_bps), DataRate::bps(bitrate_bps),
-        DataRate::bps(bitrate_bps), 0, 0, 0);
+    video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+        DataRate::BitsPerSec(bitrate_bps), DataRate::BitsPerSec(bitrate_bps),
+        DataRate::BitsPerSec(bitrate_bps), 0, 0, 0);
   }
 
   void InsertFrame() {
@@ -2914,12 +3284,15 @@ TEST_F(BalancedDegradationTest, AdaptDownReturnsFalseIfFpsDiffLtThreshold) {
   stats_proxy_->SetMockStats(stats);
 
   InsertFrameAndWaitForEncoded();
-  VerifyFpsMaxResolutionMax(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsMaxResolutionMax());
 
   // Trigger adapt down, expect scaled down framerate (640x360@24fps).
-  // Fps diff (input-requested:0) < threshold, expect AdaptDown to return false.
-  video_stream_encoder_->TriggerQualityLowExpectFalse();
-  VerifyFpsEqResolutionMax(source_.sink_wants(), 24);
+  // Fps diff (input-requested:0) < threshold, expect adapting down not to clear
+  // QP samples.
+  EXPECT_FALSE(
+      video_stream_encoder_
+          ->TriggerQualityScalerHighQpAndReturnIfQpSamplesShouldBeCleared());
+  EXPECT_THAT(source_.sink_wants(), FpsMatchesResolutionMax(Eq(24)));
 
   video_stream_encoder_->Stop();
 }
@@ -2937,12 +3310,15 @@ TEST_F(BalancedDegradationTest, AdaptDownReturnsTrueIfFpsDiffGeThreshold) {
   stats_proxy_->SetMockStats(stats);
 
   InsertFrameAndWaitForEncoded();
-  VerifyFpsMaxResolutionMax(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsMaxResolutionMax());
 
   // Trigger adapt down, expect scaled down framerate (640x360@24fps).
-  // Fps diff (input-requested:1) == threshold, expect AdaptDown to return true.
-  video_stream_encoder_->TriggerQualityLow();
-  VerifyFpsEqResolutionMax(source_.sink_wants(), 24);
+  // Fps diff (input-requested:1) == threshold, expect adapting down to clear QP
+  // samples.
+  EXPECT_TRUE(
+      video_stream_encoder_
+          ->TriggerQualityScalerHighQpAndReturnIfQpSamplesShouldBeCleared());
+  EXPECT_THAT(source_.sink_wants(), FpsMatchesResolutionMax(Eq(24)));
 
   video_stream_encoder_->Stop();
 }
@@ -2956,11 +3332,11 @@ TEST_F(BalancedDegradationTest, AdaptDownUsesCodecSpecificFps) {
   EXPECT_EQ(kVideoCodecVP8, video_encoder_config_.codec_type);
 
   InsertFrameAndWaitForEncoded();
-  VerifyFpsMaxResolutionMax(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsMaxResolutionMax());
 
   // Trigger adapt down, expect scaled down framerate (640x360@22fps).
   video_stream_encoder_->TriggerQualityLow();
-  VerifyFpsEqResolutionMax(source_.sink_wants(), 22);
+  EXPECT_THAT(source_.sink_wants(), FpsMatchesResolutionMax(Eq(22)));
 
   video_stream_encoder_->Stop();
 }
@@ -2976,25 +3352,25 @@ TEST_F(BalancedDegradationTest, NoAdaptUpIfBwEstimateIsLessThanMinBitrate) {
   OnBitrateUpdated(kTooLowMinBitrateBps);
 
   InsertFrameAndWaitForEncoded();
-  VerifyFpsMaxResolutionMax(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsMaxResolutionMax());
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down framerate (640x360@14fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionMax(source_.sink_wants(), 14);
+  EXPECT_THAT(source_.sink_wants(), FpsMatchesResolutionMax(Eq(14)));
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down resolution (480x270@14fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionLt(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsEqResolutionLt(source_.last_wants()));
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down framerate (480x270@10fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsLtResolutionEq(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsLtResolutionEq(source_.last_wants()));
   EXPECT_EQ(source_.sink_wants().max_framerate_fps, 10);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
@@ -3021,7 +3397,7 @@ TEST_F(BalancedDegradationTest,
   SetupTest();
   OnBitrateUpdated(kLowTargetBitrateBps);
 
-  VerifyNoLimitation(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), UnlimitedSinkWants());
 
   // Insert frame, expect scaled down:
   // framerate (640x360@24fps) -> resolution (480x270@24fps).
@@ -3056,31 +3432,31 @@ TEST_F(BalancedDegradationTest,
   OnBitrateUpdated(kTooLowMinResolutionBitrateBps);
 
   InsertFrameAndWaitForEncoded();
-  VerifyFpsMaxResolutionMax(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsMaxResolutionMax());
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down framerate (640x360@14fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionMax(source_.sink_wants(), 14);
+  EXPECT_THAT(source_.sink_wants(), FpsMatchesResolutionMax(Eq(14)));
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down resolution (480x270@14fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionLt(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsEqResolutionLt(source_.last_wants()));
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down framerate (480x270@10fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsLtResolutionEq(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsLtResolutionEq(source_.last_wants()));
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect upscaled fps (no bitrate limit) (480x270@14fps).
   video_stream_encoder_->TriggerQualityHigh();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsGtResolutionEq(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsGtResolutionEq(source_.last_wants()));
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no upscale in res (target bitrate < min bitrate).
@@ -3092,7 +3468,7 @@ TEST_F(BalancedDegradationTest,
   OnBitrateUpdated(kResolutionMinBitrateBps);
   video_stream_encoder_->TriggerQualityHigh();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionGt(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsEqResolutionGt(source_.last_wants()));
   EXPECT_EQ(5, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   video_stream_encoder_->Stop();
@@ -3112,25 +3488,25 @@ TEST_F(BalancedDegradationTest,
   OnBitrateUpdated(kTooLowMinBitrateBps);
 
   InsertFrameAndWaitForEncoded();
-  VerifyFpsMaxResolutionMax(source_.sink_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsMaxResolutionMax());
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down framerate (640x360@14fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionMax(source_.sink_wants(), 14);
+  EXPECT_THAT(source_.sink_wants(), FpsMatchesResolutionMax(Eq(14)));
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down resolution (480x270@14fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionLt(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsEqResolutionLt(source_.last_wants()));
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt down, expect scaled down framerate (480x270@10fps).
   video_stream_encoder_->TriggerQualityLow();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsLtResolutionEq(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsLtResolutionEq(source_.last_wants()));
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no upscale (target bitrate < min bitrate).
@@ -3142,7 +3518,7 @@ TEST_F(BalancedDegradationTest,
   OnBitrateUpdated(kMinBitrateBps);
   video_stream_encoder_->TriggerQualityHigh();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsGtResolutionEq(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsGtResolutionEq(source_.last_wants()));
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no upscale in res (target bitrate < min bitrate).
@@ -3155,7 +3531,7 @@ TEST_F(BalancedDegradationTest,
   OnBitrateUpdated(kResolutionMinBitrateBps);
   video_stream_encoder_->TriggerQualityHigh();
   InsertFrameAndWaitForEncoded();
-  VerifyFpsEqResolutionGt(source_.sink_wants(), source_.last_wants());
+  EXPECT_THAT(source_.sink_wants(), FpsEqResolutionGt(source_.last_wants()));
   EXPECT_EQ(5, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   video_stream_encoder_->Stop();
@@ -3165,9 +3541,10 @@ TEST_F(VideoStreamEncoderTest,
        AdaptsResolutionOnOveruseAndLowQuality_MaintainFramerateMode) {
   const int kWidth = 1280;
   const int kHeight = 720;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -3178,7 +3555,7 @@ TEST_F(VideoStreamEncoderTest,
   int64_t timestamp_ms = kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -3189,7 +3566,8 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -3200,7 +3578,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionLt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -3211,7 +3589,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionLt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
@@ -3222,7 +3600,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionLt(source.last_wants()));
   rtc::VideoSinkWants last_wants = source.sink_wants();
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
@@ -3234,68 +3612,74 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionEq(source.sink_wants(), last_wants);
+  EXPECT_THAT(source.sink_wants(), FpsMax());
+  EXPECT_EQ(source.sink_wants().max_pixel_count, last_wants.max_pixel_count);
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger cpu adapt up, expect upscaled resolution (480x270).
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  // Trigger quality adapt up, expect upscaled resolution (480x270).
+  video_stream_encoder_->TriggerQualityHigh();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
+  EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
+  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
+  EXPECT_EQ(3, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
+  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+
+  // Trigger quality and cpu adapt up since both are most limited, expect
+  // upscaled resolution (640x360).
+  video_stream_encoder_->TriggerCpuUnderuse();
+  video_stream_encoder_->TriggerQualityHigh();
+  timestamp_ms += kFrameIntervalMs;
+  source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
+  WaitForEncodedFrame(timestamp_ms);
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger cpu adapt up, expect upscaled resolution (640x360).
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  // Trigger quality and cpu adapt up since both are most limited, expect
+  // upscaled resolution (960x540).
+  video_stream_encoder_->TriggerCpuUnderuse();
+  video_stream_encoder_->TriggerQualityHigh();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
+  last_wants = source.sink_wants();
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(5, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger cpu adapt up, expect upscaled resolution (960x540).
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  // Trigger cpu adapt up, expect no change since not most limited (960x540).
+  // However the stats will change since the CPU resource is no longer limited.
+  video_stream_encoder_->TriggerCpuUnderuse();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
-  last_wants = source.sink_wants();
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionEqTo(last_wants));
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(6, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
-
-  // Trigger cpu adapt up, no cpu downgrades, expect no change (960x540).
-  video_stream_encoder_->TriggerCpuNormalUsage();
-  timestamp_ms += kFrameIntervalMs;
-  source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
-  WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionEq(source.sink_wants(), last_wants);
-  EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
-  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
-  EXPECT_EQ(6, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger quality adapt up, expect no restriction (1280x720).
   video_stream_encoder_->TriggerQualityHigh();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_EQ(6, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(5, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   video_stream_encoder_->Stop();
 }
@@ -3304,9 +3688,10 @@ TEST_F(VideoStreamEncoderTest, CpuLimitedHistogramIsReported) {
   const int kWidth = 640;
   const int kHeight = 360;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   for (int i = 1; i <= SendStatisticsProxy::kMinRequiredMetricsSamples; ++i) {
     video_source_.IncomingCapturedFrame(CreateFrame(i, kWidth, kHeight));
@@ -3332,9 +3717,10 @@ TEST_F(VideoStreamEncoderTest, CpuLimitedHistogramIsReported) {
 
 TEST_F(VideoStreamEncoderTest,
        CpuLimitedHistogramIsNotReportedForDisabledDegradation) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   const int kWidth = 640;
   const int kHeight = 360;
 
@@ -3366,9 +3752,10 @@ TEST_F(VideoStreamEncoderTest, CallsBitrateObserver) {
 
   EXPECT_CALL(bitrate_observer, OnBitrateAllocationUpdated(expected_bitrate))
       .Times(1);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kLowTargetBitrateBps), DataRate::bps(kLowTargetBitrateBps),
-      DataRate::bps(kLowTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kLowTargetBitrateBps),
+      DataRate::BitsPerSec(kLowTargetBitrateBps),
+      DataRate::BitsPerSec(kLowTargetBitrateBps), 0, 0, 0);
 
   video_source_.IncomingCapturedFrame(
       CreateFrame(rtc::TimeMillis(), codec_width_, codec_height_));
@@ -3474,9 +3861,10 @@ TEST_F(VideoStreamEncoderTest, OveruseDetectorUpdatedOnReconfigureAndAdaption) {
   const int kFrameHeight = 720;
   const int kFramerate = 24;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   test::FrameForwarder source;
   video_stream_encoder_->SetSource(
       &source, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
@@ -3520,7 +3908,7 @@ TEST_F(VideoStreamEncoderTest, OveruseDetectorUpdatedOnReconfigureAndAdaption) {
   stats = stats_proxy_->GetStats();
   stats.input_frame_rate = adapted_framerate / 2;
   stats_proxy_->SetMockStats(stats);
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   video_stream_encoder_->WaitUntilTaskQueueIsIdle();
   EXPECT_EQ(
       video_stream_encoder_->overuse_detector_proxy_->GetLastTargetFramerate(),
@@ -3536,9 +3924,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kLowFramerate = 15;
   const int kHighFramerate = 25;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   test::FrameForwarder source;
   video_stream_encoder_->SetSource(
       &source, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
@@ -3586,7 +3975,7 @@ TEST_F(VideoStreamEncoderTest,
   stats = stats_proxy_->GetStats();
   stats.input_frame_rate = adapted_framerate;
   stats_proxy_->SetMockStats(stats);
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   video_stream_encoder_->WaitUntilTaskQueueIsIdle();
   EXPECT_EQ(
       video_stream_encoder_->overuse_detector_proxy_->GetLastTargetFramerate(),
@@ -3601,9 +3990,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kFrameHeight = 720;
   const int kFramerate = 24;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   test::FrameForwarder source;
   video_stream_encoder_->SetSource(
       &source, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
@@ -3636,9 +4026,8 @@ TEST_F(VideoStreamEncoderTest,
 
   // Change degradation preference to not enable framerate scaling. Target
   // framerate should be changed to codec defined limit.
-  video_stream_encoder_->SetSource(
+  video_stream_encoder_->SetSourceAndWaitForFramerateUpdated(
       &source, webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
-  video_stream_encoder_->WaitUntilTaskQueueIsIdle();
   EXPECT_EQ(
       video_stream_encoder_->overuse_detector_proxy_->GetLastTargetFramerate(),
       kFramerate);
@@ -3648,10 +4037,10 @@ TEST_F(VideoStreamEncoderTest,
 
 TEST_F(VideoStreamEncoderTest, DropsFramesAndScalesWhenBitrateIsTooLow) {
   const int kTooLowBitrateForFrameSizeBps = 10000;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kTooLowBitrateForFrameSizeBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps), 0, 0, 0);
   const int kWidth = 640;
   const int kHeight = 360;
 
@@ -3661,7 +4050,8 @@ TEST_F(VideoStreamEncoderTest, DropsFramesAndScalesWhenBitrateIsTooLow) {
   ExpectDroppedFrame();
 
   // Expect the sink_wants to specify a scaled frame.
-  EXPECT_LT(video_source_.sink_wants().max_pixel_count, kWidth * kHeight);
+  EXPECT_TRUE_WAIT(
+      video_source_.sink_wants().max_pixel_count < kWidth * kHeight, 5000);
 
   int last_pixel_count = video_source_.sink_wants().max_pixel_count;
 
@@ -3672,7 +4062,8 @@ TEST_F(VideoStreamEncoderTest, DropsFramesAndScalesWhenBitrateIsTooLow) {
   // Expect to drop this frame, the wait should time out.
   ExpectDroppedFrame();
 
-  EXPECT_LT(video_source_.sink_wants().max_pixel_count, last_pixel_count);
+  EXPECT_TRUE_WAIT(
+      video_source_.sink_wants().max_pixel_count < last_pixel_count, 5000);
 
   video_stream_encoder_->Stop();
 }
@@ -3680,10 +4071,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesAndScalesWhenBitrateIsTooLow) {
 TEST_F(VideoStreamEncoderTest,
        NumberOfDroppedFramesLimitedWhenBitrateIsTooLow) {
   const int kTooLowBitrateForFrameSizeBps = 10000;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kTooLowBitrateForFrameSizeBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps), 0, 0, 0);
   const int kWidth = 640;
   const int kHeight = 360;
 
@@ -3707,9 +4098,10 @@ TEST_F(VideoStreamEncoderTest,
        InitialFrameDropOffWithMaintainResolutionPreference) {
   const int kWidth = 640;
   const int kHeight = 360;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kLowTargetBitrateBps), DataRate::bps(kLowTargetBitrateBps),
-      DataRate::bps(kLowTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kLowTargetBitrateBps),
+      DataRate::BitsPerSec(kLowTargetBitrateBps),
+      DataRate::BitsPerSec(kLowTargetBitrateBps), 0, 0, 0);
 
   // Set degradation preference.
   video_stream_encoder_->SetSource(
@@ -3733,9 +4125,10 @@ TEST_F(VideoStreamEncoderTest, InitialFrameDropOffWhenEncoderDisabledScaling) {
   video_encoder_config.video_format.parameters["foo"] = "foo";
   video_stream_encoder_->ConfigureEncoder(std::move(video_encoder_config),
                                           kMaxPayloadLength);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kLowTargetBitrateBps), DataRate::bps(kLowTargetBitrateBps),
-      DataRate::bps(kLowTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kLowTargetBitrateBps),
+      DataRate::BitsPerSec(kLowTargetBitrateBps),
+      DataRate::BitsPerSec(kLowTargetBitrateBps), 0, 0, 0);
 
   // Force quality scaler reconfiguration by resetting the source.
   video_stream_encoder_->SetSource(&video_source_,
@@ -3760,31 +4153,33 @@ TEST_F(VideoStreamEncoderTest, InitialFrameDropActivatesWhenBweDrops) {
   const int kWidth = 640;
   const int kHeight = 360;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(1, kWidth, kHeight));
   // Frame should not be dropped.
   WaitForEncodedFrame(1);
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kNotTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kNotTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kNotTooLowBitrateForFrameSizeBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kNotTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kNotTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kNotTooLowBitrateForFrameSizeBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(2, kWidth, kHeight));
   // Frame should not be dropped.
   WaitForEncodedFrame(2);
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kTooLowBitrateForFrameSizeBps),
-      DataRate::bps(kTooLowBitrateForFrameSizeBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps),
+      DataRate::BitsPerSec(kTooLowBitrateForFrameSizeBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(CreateFrame(3, kWidth, kHeight));
   // Expect to drop this frame, the wait should time out.
   ExpectDroppedFrame();
 
   // Expect the sink_wants to specify a scaled frame.
-  EXPECT_LT(video_source_.sink_wants().max_pixel_count, kWidth * kHeight);
+  EXPECT_TRUE_WAIT(
+      video_source_.sink_wants().max_pixel_count < kWidth * kHeight, 5000);
   video_stream_encoder_->Stop();
 }
 
@@ -3795,6 +4190,7 @@ TEST_F(VideoStreamEncoderTest, RampsUpInQualityWhenBwIsHigh) {
   // Reset encoder for field trials to take effect.
   VideoEncoderConfig config = video_encoder_config_.Copy();
   config.max_bitrate_bps = kTargetBitrateBps;
+  DataRate max_bitrate = DataRate::BitsPerSec(config.max_bitrate_bps);
   ConfigureEncoder(std::move(config));
   fake_encoder_.SetQp(kQpLow);
 
@@ -3806,9 +4202,10 @@ TEST_F(VideoStreamEncoderTest, RampsUpInQualityWhenBwIsHigh) {
 
   // Start at low bitrate.
   const int kLowBitrateBps = 200000;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kLowBitrateBps), DataRate::bps(kLowBitrateBps),
-      DataRate::bps(kLowBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kLowBitrateBps),
+      DataRate::BitsPerSec(kLowBitrateBps),
+      DataRate::BitsPerSec(kLowBitrateBps), 0, 0, 0);
 
   // Expect first frame to be dropped and resolution to be limited.
   const int kWidth = 1280;
@@ -3817,13 +4214,12 @@ TEST_F(VideoStreamEncoderTest, RampsUpInQualityWhenBwIsHigh) {
   int64_t timestamp_ms = kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   ExpectDroppedFrame();
-  EXPECT_LT(source.sink_wants().max_pixel_count, kWidth * kHeight);
+  EXPECT_TRUE_WAIT(source.sink_wants().max_pixel_count < kWidth * kHeight,
+                   5000);
 
   // Increase bitrate to encoder max.
-  video_stream_encoder_->OnBitrateUpdated(DataRate::bps(config.max_bitrate_bps),
-                                          DataRate::bps(config.max_bitrate_bps),
-                                          DataRate::bps(config.max_bitrate_bps),
-                                          0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      max_bitrate, max_bitrate, max_bitrate, 0, 0, 0);
 
   // Insert frames and advance |min_duration_ms|.
   for (size_t i = 1; i <= 10; i++) {
@@ -3840,7 +4236,10 @@ TEST_F(VideoStreamEncoderTest, RampsUpInQualityWhenBwIsHigh) {
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  // The ramp-up code involves the adaptation queue, give it time to execute.
+  // TODO(hbos): Can we await an appropriate event instead?
+  video_stream_encoder_->WaitUntilAdaptationTaskQueueIsIdle();
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
 
   // Frame should not be adapted.
   timestamp_ms += kFrameIntervalMs;
@@ -3855,22 +4254,23 @@ TEST_F(VideoStreamEncoderTest,
        ResolutionNotAdaptedForTooSmallFrame_MaintainFramerateMode) {
   const int kTooSmallWidth = 10;
   const int kTooSmallHeight = 10;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable MAINTAIN_FRAMERATE preference, no initial limitation.
   test::FrameForwarder source;
   video_stream_encoder_->SetSource(
       &source, webrtc::DegradationPreference::MAINTAIN_FRAMERATE);
-  VerifyNoLimitation(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), UnlimitedSinkWants());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
 
   // Trigger adapt down, too small frame, expect no change.
   source.IncomingCapturedFrame(CreateFrame(1, kTooSmallWidth, kTooSmallHeight));
   WaitForEncodedFrame(1);
   video_stream_encoder_->TriggerCpuOveruse();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
 
@@ -3882,15 +4282,16 @@ TEST_F(VideoStreamEncoderTest,
   const int kTooSmallWidth = 10;
   const int kTooSmallHeight = 10;
   const int kFpsLimit = 7;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   test::FrameForwarder source;
   video_stream_encoder_->SetSource(&source,
                                    webrtc::DegradationPreference::BALANCED);
-  VerifyNoLimitation(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), UnlimitedSinkWants());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
 
@@ -3898,7 +4299,7 @@ TEST_F(VideoStreamEncoderTest,
   source.IncomingCapturedFrame(CreateFrame(1, kTooSmallWidth, kTooSmallHeight));
   WaitForEncodedFrame(1);
   video_stream_encoder_->TriggerQualityLow();
-  VerifyFpsEqResolutionMax(source.sink_wants(), kFpsLimit);
+  EXPECT_THAT(source.sink_wants(), FpsMatchesResolutionMax(Eq(kFpsLimit)));
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -3907,7 +4308,7 @@ TEST_F(VideoStreamEncoderTest,
   source.IncomingCapturedFrame(CreateFrame(2, kTooSmallWidth, kTooSmallHeight));
   WaitForEncodedFrame(2);
   video_stream_encoder_->TriggerQualityLow();
-  VerifyFpsEqResolutionMax(source.sink_wants(), kFpsLimit);
+  EXPECT_THAT(source.sink_wants(), FpsMatchesResolutionMax(Eq(kFpsLimit)));
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -3917,9 +4318,10 @@ TEST_F(VideoStreamEncoderTest,
 
 TEST_F(VideoStreamEncoderTest, FailingInitEncodeDoesntCauseCrash) {
   fake_encoder_.ForceInitEncodeFailure(true);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   ResetEncoder("VP8", 2, 1, 1, false);
   const int kFrameWidth = 1280;
   const int kFrameHeight = 720;
@@ -3932,9 +4334,10 @@ TEST_F(VideoStreamEncoderTest, FailingInitEncodeDoesntCauseCrash) {
 // TODO(sprang): Extend this with fps throttling and any "balanced" extensions.
 TEST_F(VideoStreamEncoderTest,
        AdaptsResolutionOnOveruse_MaintainFramerateMode) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   const int kFrameWidth = 1280;
   const int kFrameHeight = 720;
@@ -3954,7 +4357,7 @@ TEST_F(VideoStreamEncoderTest,
   WaitForEncodedFrame((kFrameWidth * 3) / 4, (kFrameHeight * 3) / 4);
 
   // Trigger CPU normal use, return to original resolution.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   video_source_.IncomingCapturedFrame(
       CreateFrame(3 * kFrameIntervalMs, kFrameWidth, kFrameHeight));
   WaitForEncodedFrame(kFrameWidth, kFrameHeight);
@@ -3967,9 +4370,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kFrameWidth = 1280;
   const int kFrameHeight = 720;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_stream_encoder_->SetSource(
       &video_source_, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
   video_source_.set_adaptation_enabled(true);
@@ -4027,7 +4431,7 @@ TEST_F(VideoStreamEncoderTest,
               kErrorMargin);
 
   // Go back up one step.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   num_frames_dropped = 0;
   for (int i = 0; i < max_framerate_; ++i) {
     timestamp_ms += kFrameIntervalMs;
@@ -4043,7 +4447,7 @@ TEST_F(VideoStreamEncoderTest,
               kErrorMargin);
 
   // Go back up to original mode.
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   num_frames_dropped = 0;
   for (int i = 0; i < max_framerate_; ++i) {
     timestamp_ms += kFrameIntervalMs;
@@ -4070,9 +4474,10 @@ TEST_F(VideoStreamEncoderTest, DoesntAdaptDownPastMinFramerate) {
   // disable frame dropping and make testing easier.
   ResetEncoder("VP8", 1, 2, 1, true);
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_stream_encoder_->SetSource(
       &video_source_, webrtc::DegradationPreference::MAINTAIN_RESOLUTION);
   video_source_.set_adaptation_enabled(true);
@@ -4099,7 +4504,8 @@ TEST_F(VideoStreamEncoderTest, DoesntAdaptDownPastMinFramerate) {
   } while (video_source_.sink_wants().max_framerate_fps <
            last_wants.max_framerate_fps);
 
-  VerifyFpsEqResolutionMax(video_source_.sink_wants(), kMinFramerateFps);
+  EXPECT_THAT(video_source_.sink_wants(),
+              FpsMatchesResolutionMax(Eq(kMinFramerateFps)));
 
   video_stream_encoder_->Stop();
 }
@@ -4110,9 +4516,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kHeight = 720;
   const int64_t kFrameIntervalMs = 150;
   int64_t timestamp_ms = kFrameIntervalMs;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -4122,7 +4529,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(0, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4132,7 +4539,8 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4142,7 +4550,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionLt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4152,7 +4560,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsLtResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsLtResolutionEq(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4162,7 +4570,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionLt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4172,7 +4580,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsLtResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsLtResolutionEq(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(5, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4182,7 +4590,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionLt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(6, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4192,7 +4600,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsLtResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsLtResolutionEq(source.last_wants()));
   rtc::VideoSinkWants last_wants = source.sink_wants();
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
@@ -4203,17 +4611,17 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionEq(source.sink_wants(), last_wants);
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionEqTo(last_wants));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(7, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger adapt down, expect expect increased fps (320x180@10fps).
+  // Trigger adapt up, expect expect increased fps (320x180@10fps).
   video_stream_encoder_->TriggerQualityHigh();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsGtResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsGtResolutionEq(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(8, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4223,7 +4631,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionGt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionGt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(9, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4233,7 +4641,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsGtResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsGtResolutionEq(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(10, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4243,7 +4651,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionGt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionGt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(11, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4253,7 +4661,9 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMax());
+  EXPECT_EQ(source.sink_wants().max_pixel_count,
+            source.last_wants().max_pixel_count);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(12, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4263,7 +4673,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(13, stats_proxy_->GetStats().number_of_quality_adapt_changes);
@@ -4273,15 +4683,15 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_EQ(14, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no change.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_EQ(14, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   video_stream_encoder_->Stop();
@@ -4292,9 +4702,10 @@ TEST_F(VideoStreamEncoderTest, AdaptWithTwoReasonsAndDifferentOrder_Framerate) {
   const int kHeight = 720;
   const int64_t kFrameIntervalMs = 150;
   int64_t timestamp_ms = kFrameIntervalMs;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -4304,7 +4715,7 @@ TEST_F(VideoStreamEncoderTest, AdaptWithTwoReasonsAndDifferentOrder_Framerate) {
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
@@ -4317,7 +4728,8 @@ TEST_F(VideoStreamEncoderTest, AdaptWithTwoReasonsAndDifferentOrder_Framerate) {
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), kWidth * kHeight);
+  EXPECT_THAT(source.sink_wants(),
+              FpsMaxResolutionMatches(Lt(kWidth * kHeight)));
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
@@ -4330,7 +4742,7 @@ TEST_F(VideoStreamEncoderTest, AdaptWithTwoReasonsAndDifferentOrder_Framerate) {
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionLt(source.last_wants()));
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
@@ -4343,59 +4755,77 @@ TEST_F(VideoStreamEncoderTest, AdaptWithTwoReasonsAndDifferentOrder_Framerate) {
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsLtResolutionEq(source.sink_wants(), source.last_wants());
-  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
+  EXPECT_THAT(source.sink_wants(), FpsLtResolutionEq(source.last_wants()));
+  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger cpu adapt up, expect increased fps (640x360@30fps).
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  // Trigger cpu adapt up, expect no change since QP is most limited.
+  {
+    // Store current sink wants since we expect no change and if there is no
+    // change then last_wants() is not updated.
+    auto previous_sink_wants = source.sink_wants();
+    video_stream_encoder_->TriggerCpuUnderuse();
+    timestamp_ms += kFrameIntervalMs;
+    source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
+    WaitForEncodedFrame(timestamp_ms);
+    EXPECT_THAT(source.sink_wants(), FpsEqResolutionEqTo(previous_sink_wants));
+    EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
+    EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  }
+
+  // Trigger quality adapt up, expect increased fps (640x360@30fps).
+  video_stream_encoder_->TriggerQualityHigh();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionEq(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsGtResolutionEq(source.last_wants()));
+  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
+  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
+  EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
+  EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
+  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
+  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+
+  // Trigger quality adapt up and Cpu adapt up since both are most limited,
+  // expect increased resolution (960x540@30fps).
+  video_stream_encoder_->TriggerQualityHigh();
+  video_stream_encoder_->TriggerCpuUnderuse();
+  timestamp_ms += kFrameIntervalMs;
+  source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
+  WaitForEncodedFrame(timestamp_ms);
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(3, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger quality adapt up, expect upscaled resolution (960x540@30fps).
+  // Trigger quality adapt up and Cpu adapt up since both are most limited,
+  // expect no restriction (1280x720fps@30fps).
   video_stream_encoder_->TriggerQualityHigh();
-  timestamp_ms += kFrameIntervalMs;
-  source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
-  WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
-  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
-  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
-  EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_resolution);
-  EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
-  EXPECT_EQ(3, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
-
-  // Trigger cpu adapt up,  expect no restriction (1280x720fps@30fps).
-  video_stream_encoder_->TriggerCpuNormalUsage();
+  video_stream_encoder_->TriggerCpuUnderuse();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionGt(source.sink_wants(), source.last_wants());
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionGt(source.last_wants()));
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no change.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_EQ(4, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(4, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   video_stream_encoder_->Stop();
 }
@@ -4407,9 +4837,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kFpsLimit = 15;
   const int64_t kFrameIntervalMs = 150;
   int64_t timestamp_ms = kFrameIntervalMs;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Enable BALANCED preference, no initial limitation.
   AdaptingFrameForwarder source;
@@ -4419,7 +4850,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(kWidth, kHeight);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
@@ -4432,7 +4863,7 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionMax(source.sink_wants(), kFpsLimit);
+  EXPECT_THAT(source.sink_wants(), FpsMatchesResolutionMax(Eq(kFpsLimit)));
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
@@ -4445,45 +4876,60 @@ TEST_F(VideoStreamEncoderTest,
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionLt(source.sink_wants(), source.last_wants());
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionLt(source.last_wants()));
   EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_resolution);
-  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
+  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
   EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
-  // Trigger cpu adapt up, expect upscaled resolution (640x360@15fps).
-  video_stream_encoder_->TriggerCpuNormalUsage();
-  timestamp_ms += kFrameIntervalMs;
-  source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
-  WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsEqResolutionGt(source.sink_wants(), source.last_wants());
-  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
-  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
-  EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
-  EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  // Trigger cpu adapt up, expect no change because quality is most limited.
+  {
+    auto previous_sink_wants = source.sink_wants();
+    // Store current sink wants since we expect no change ind if there is no
+    // change then last__wants() is not updated.
+    video_stream_encoder_->TriggerCpuUnderuse();
+    timestamp_ms += kFrameIntervalMs;
+    source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
+    WaitForEncodedFrame(timestamp_ms);
+    EXPECT_THAT(source.sink_wants(), FpsEqResolutionEqTo(previous_sink_wants));
+    EXPECT_EQ(1, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
+    EXPECT_EQ(1, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  }
 
-  // Trigger quality adapt up, expect increased fps (640x360@30fps).
+  // Trigger quality adapt up, expect upscaled resolution (640x360@15fps).
   video_stream_encoder_->TriggerQualityHigh();
   timestamp_ms += kFrameIntervalMs;
   source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
   WaitForEncodedFrame(timestamp_ms);
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsEqResolutionGt(source.last_wants()));
+  EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
+  EXPECT_TRUE(stats_proxy_->GetStats().bw_limited_framerate);
+  EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
+  EXPECT_TRUE(stats_proxy_->GetStats().cpu_limited_framerate);
+  EXPECT_EQ(1, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
+  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+
+  // Trigger quality and cpu adapt up, expect increased fps (640x360@30fps).
+  video_stream_encoder_->TriggerQualityHigh();
+  video_stream_encoder_->TriggerCpuUnderuse();
+  timestamp_ms += kFrameIntervalMs;
+  source.IncomingCapturedFrame(CreateFrame(timestamp_ms, kWidth, kHeight));
+  WaitForEncodedFrame(timestamp_ms);
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().bw_limited_framerate);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_resolution);
   EXPECT_FALSE(stats_proxy_->GetStats().cpu_limited_framerate);
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   // Trigger adapt up, expect no change.
   video_stream_encoder_->TriggerQualityHigh();
-  VerifyFpsMaxResolutionMax(source.sink_wants());
+  EXPECT_THAT(source.sink_wants(), FpsMaxResolutionMax());
   EXPECT_EQ(2, stats_proxy_->GetStats().number_of_cpu_adapt_changes);
-  EXPECT_EQ(2, stats_proxy_->GetStats().number_of_quality_adapt_changes);
+  EXPECT_EQ(3, stats_proxy_->GetStats().number_of_quality_adapt_changes);
 
   video_stream_encoder_->Stop();
 }
@@ -4497,9 +4943,10 @@ TEST_F(VideoStreamEncoderTest, AcceptsFullHdAdaptedDownSimulcastFrames) {
   const int kAdaptedFrameHeight = 808;
   const int kFramerate = 24;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   // Trigger reconfigure encoder (without resetting the entire instance).
   VideoEncoderConfig video_encoder_config;
   video_encoder_config.codec_type = kVideoCodecVP8;
@@ -4532,9 +4979,10 @@ TEST_F(VideoStreamEncoderTest, PeriodicallyUpdatesChannelParameters) {
   const int kLowFps = 2;
   const int kHighFps = 30;
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   int64_t timestamp_ms = fake_clock_.TimeNanos() / rtc::kNumNanosecsPerMillisec;
   max_framerate_ = kLowFps;
@@ -4548,9 +4996,10 @@ TEST_F(VideoStreamEncoderTest, PeriodicallyUpdatesChannelParameters) {
   }
 
   // Make sure encoder is updated with new target.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(
       CreateFrame(timestamp_ms, kFrameWidth, kFrameHeight));
   WaitForEncodedFrame(timestamp_ms);
@@ -4587,9 +5036,10 @@ TEST_F(VideoStreamEncoderTest, DoesNotUpdateBitrateAllocationWhenSuspended) {
 
   MockBitrateObserver bitrate_observer;
   video_stream_encoder_->SetBitrateAllocationObserver(&bitrate_observer);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_stream_encoder_->WaitUntilTaskQueueIsIdle();
 
   // Insert a first video frame, causes another bitrate update.
@@ -4600,8 +5050,9 @@ TEST_F(VideoStreamEncoderTest, DoesNotUpdateBitrateAllocationWhenSuspended) {
   WaitForEncodedFrame(timestamp_ms);
 
   // Next, simulate video suspension due to pacer queue overrun.
-  video_stream_encoder_->OnBitrateUpdated(DataRate::bps(0), DataRate::bps(0),
-                                          DataRate::bps(0), 0, 1, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(0), DataRate::BitsPerSec(0), DataRate::BitsPerSec(0),
+      0, 1, 0);
 
   // Skip ahead until a new periodic parameter update should have occured.
   timestamp_ms += kProcessIntervalMs;
@@ -4621,9 +5072,10 @@ TEST_F(VideoStreamEncoderTest,
   const int kFrameWidth = 1280;
   const int kFrameHeight = 720;
   const CpuOveruseOptions default_options;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(
       CreateFrame(1, kFrameWidth, kFrameHeight));
   WaitForEncodedFrame(1);
@@ -4645,9 +5097,10 @@ TEST_F(VideoStreamEncoderTest,
   hardware_options.high_encode_usage_threshold_percent = 200;
   fake_encoder_.SetIsHardwareAccelerated(true);
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_source_.IncomingCapturedFrame(
       CreateFrame(1, kFrameWidth, kFrameHeight));
   WaitForEncodedFrame(1);
@@ -4667,9 +5120,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesWhenEncoderOvershoots) {
   const int kTargetBitrateBps = 120000;
   const int kNumFramesInRun = kFps * 5;  // Runs of five seconds.
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   int64_t timestamp_ms = fake_clock_.TimeNanos() / rtc::kNumNanosecsPerMillisec;
   max_framerate_ = kFps;
@@ -4703,10 +5157,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesWhenEncoderOvershoots) {
     overshoot_factor *= 2;
   }
   fake_encoder_.SimulateOvershoot(overshoot_factor);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps + 1000),
-      DataRate::bps(kTargetBitrateBps + 1000),
-      DataRate::bps(kTargetBitrateBps + 1000), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps + 1000),
+      DataRate::BitsPerSec(kTargetBitrateBps + 1000),
+      DataRate::BitsPerSec(kTargetBitrateBps + 1000), 0, 0, 0);
   num_dropped = 0;
   for (int i = 0; i < kNumFramesInRun; ++i) {
     video_source_.IncomingCapturedFrame(
@@ -4718,9 +5172,10 @@ TEST_F(VideoStreamEncoderTest, DropsFramesWhenEncoderOvershoots) {
     timestamp_ms += 1000 / kFps;
   }
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Target framerate should be still be near the expected target, despite
   // the frame drops.
@@ -4742,9 +5197,10 @@ TEST_F(VideoStreamEncoderTest, ConfiguresCorrectFrameRate) {
 
   int64_t timestamp_ms = fake_clock_.TimeNanos() / rtc::kNumNanosecsPerMillisec;
   max_framerate_ = kActualInputFps;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Insert 3 seconds of video, with an input fps lower than configured max.
   for (int i = 0; i < kActualInputFps * 3; ++i) {
@@ -4762,9 +5218,10 @@ TEST_F(VideoStreamEncoderTest, ConfiguresCorrectFrameRate) {
 
 TEST_F(VideoStreamEncoderTest, AccumulatesUpdateRectOnDroppedFrames) {
   VideoFrame::UpdateRect rect;
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   fake_encoder_.BlockNextEncode();
   video_source_.IncomingCapturedFrame(
@@ -4807,9 +5264,10 @@ TEST_F(VideoStreamEncoderTest, AccumulatesUpdateRectOnDroppedFrames) {
 }
 
 TEST_F(VideoStreamEncoderTest, SetsFrameTypes) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // First frame is always keyframe.
   video_source_.IncomingCapturedFrame(CreateFrame(1, nullptr));
@@ -4839,10 +5297,10 @@ TEST_F(VideoStreamEncoderTest, SetsFrameTypes) {
 TEST_F(VideoStreamEncoderTest, SetsFrameTypesSimulcast) {
   // Setup simulcast with three streams.
   ResetEncoder("VP8", 3, 1, 1, false);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kSimulcastTargetBitrateBps),
-      DataRate::bps(kSimulcastTargetBitrateBps),
-      DataRate::bps(kSimulcastTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kSimulcastTargetBitrateBps),
+      DataRate::BitsPerSec(kSimulcastTargetBitrateBps),
+      DataRate::BitsPerSec(kSimulcastTargetBitrateBps), 0, 0, 0);
   // Wait for all three layers before triggering event.
   sink_.SetNumExpectedLayers(3);
 
@@ -4882,9 +5340,10 @@ TEST_F(VideoStreamEncoderTest, RequestKeyframeInternalSource) {
   // Configure internal source factory and setup test again.
   encoder_factory_.SetHasInternalSource(true);
   ResetEncoder("VP8", 1, 1, 1, false);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   // Call encoder directly, simulating internal source where encoded frame
   // callback in VideoStreamEncoder is called despite no OnFrame().
@@ -4920,9 +5379,10 @@ TEST_F(VideoStreamEncoderTest, AdjustsTimestampInternalSource) {
   // Configure internal source factory and setup test again.
   encoder_factory_.SetHasInternalSource(true);
   ResetEncoder("VP8", 1, 1, 1, false);
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
 
   int64_t timestamp = 1;
   EncodedImage image;
@@ -5012,9 +5472,10 @@ TEST_F(VideoStreamEncoderTest, CopiesVideoFrameMetadataAfterDownscale) {
   const int kFrameHeight = 720;
   const int kTargetBitrateBps = 300000;  // To low for HD resolution.
 
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_stream_encoder_->WaitUntilTaskQueueIsIdle();
 
   // Insert a first video frame. It should be dropped because of downscale in
@@ -5052,10 +5513,10 @@ TEST_F(VideoStreamEncoderTest, BandwidthAllocationLowerBound) {
   const int kFrameHeight = 180;
 
   // Initial rate.
-  video_stream_encoder_->OnBitrateUpdated(
-      /*target_bitrate=*/DataRate::kbps(300),
-      /*stable_target_bitrate=*/DataRate::kbps(300),
-      /*link_allocation=*/DataRate::kbps(300),
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      /*target_bitrate=*/DataRate::KilobitsPerSec(300),
+      /*stable_target_bitrate=*/DataRate::KilobitsPerSec(300),
+      /*link_allocation=*/DataRate::KilobitsPerSec(300),
       /*fraction_lost=*/0,
       /*rtt_ms=*/0,
       /*cwnd_reduce_ratio=*/0);
@@ -5069,9 +5530,9 @@ TEST_F(VideoStreamEncoderTest, BandwidthAllocationLowerBound) {
 
   // Set a target rate below the minimum allowed by the codec settings.
   VideoCodec codec_config = fake_encoder_.codec_config();
-  DataRate min_rate = DataRate::kbps(codec_config.minBitrate);
-  DataRate target_rate = min_rate - DataRate::kbps(1);
-  video_stream_encoder_->OnBitrateUpdated(
+  DataRate min_rate = DataRate::KilobitsPerSec(codec_config.minBitrate);
+  DataRate target_rate = min_rate - DataRate::KilobitsPerSec(1);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
       /*target_bitrate=*/target_rate,
       /*stable_target_bitrate=*/target_rate,
       /*link_allocation=*/target_rate,
@@ -5083,7 +5544,8 @@ TEST_F(VideoStreamEncoderTest, BandwidthAllocationLowerBound) {
   // Target bitrate and bandwidth allocation should both be capped at min_rate.
   auto rate_settings = fake_encoder_.GetAndResetLastRateControlSettings();
   ASSERT_TRUE(rate_settings.has_value());
-  DataRate allocation_sum = DataRate::bps(rate_settings->bitrate.get_sum_bps());
+  DataRate allocation_sum =
+      DataRate::BitsPerSec(rate_settings->bitrate.get_sum_bps());
   EXPECT_EQ(min_rate, allocation_sum);
   EXPECT_EQ(rate_settings->bandwidth_allocation, min_rate);
 
@@ -5091,9 +5553,10 @@ TEST_F(VideoStreamEncoderTest, BandwidthAllocationLowerBound) {
 }
 
 TEST_F(VideoStreamEncoderTest, EncoderRatesPropagatedOnReconfigure) {
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   // Capture a frame and wait for it to synchronize with the encoder thread.
   int64_t timestamp_ms = fake_clock_.TimeNanos() / rtc::kNumNanosecsPerMillisec;
   video_source_.IncomingCapturedFrame(CreateFrame(timestamp_ms, nullptr));
@@ -5132,10 +5595,12 @@ TEST_F(VideoStreamEncoderTest, EncoderRatesPropagatedOnReconfigure) {
 }
 
 struct MockEncoderSwitchRequestCallback : public EncoderSwitchRequestCallback {
-  MOCK_METHOD0(RequestEncoderFallback, void());
-  MOCK_METHOD1(RequestEncoderSwitch, void(const Config& conf));
-  MOCK_METHOD1(RequestEncoderSwitch,
-               void(const webrtc::SdpVideoFormat& format));
+  MOCK_METHOD(void, RequestEncoderFallback, (), (override));
+  MOCK_METHOD(void, RequestEncoderSwitch, (const Config& conf), (override));
+  MOCK_METHOD(void,
+              RequestEncoderSwitch,
+              (const webrtc::SdpVideoFormat& format),
+              (override));
 };
 
 TEST_F(VideoStreamEncoderTest, BitrateEncoderSwitch) {
@@ -5164,10 +5629,45 @@ TEST_F(VideoStreamEncoderTest, BitrateEncoderSwitch) {
                                          Field(&Config::param, "ping"),
                                          Field(&Config::value, "pong")))));
 
-  video_stream_encoder_->OnBitrateUpdated(
-      /*target_bitrate=*/DataRate::kbps(50),
-      /*stable_target_bitrate=*/DataRate::kbps(kDontCare),
-      /*link_allocation=*/DataRate::kbps(kDontCare),
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      /*target_bitrate=*/DataRate::KilobitsPerSec(50),
+      /*stable_target_bitrate=*/DataRate::KilobitsPerSec(kDontCare),
+      /*link_allocation=*/DataRate::KilobitsPerSec(kDontCare),
+      /*fraction_lost=*/0,
+      /*rtt_ms=*/0,
+      /*cwnd_reduce_ratio=*/0);
+
+  video_stream_encoder_->Stop();
+}
+
+TEST_F(VideoStreamEncoderTest, VideoSuspendedNoEncoderSwitch) {
+  constexpr int kDontCare = 100;
+
+  StrictMock<MockEncoderSwitchRequestCallback> switch_callback;
+  video_send_config_.encoder_settings.encoder_switch_request_callback =
+      &switch_callback;
+  VideoEncoderConfig encoder_config = video_encoder_config_.Copy();
+  encoder_config.codec_type = kVideoCodecVP8;
+  webrtc::test::ScopedFieldTrials field_trial(
+      "WebRTC-NetworkCondition-EncoderSwitch/"
+      "codec_thresholds:VP8;100;-1|H264;-1;30000,"
+      "to_codec:AV1,to_param:ping,to_value:pong,window:2.0/");
+
+  // Reset encoder for new configuration to take effect.
+  ConfigureEncoder(std::move(encoder_config));
+
+  // Send one frame to trigger ReconfigureEncoder.
+  video_source_.IncomingCapturedFrame(
+      CreateFrame(kDontCare, kDontCare, kDontCare));
+
+  using Config = EncoderSwitchRequestCallback::Config;
+  EXPECT_CALL(switch_callback, RequestEncoderSwitch(Matcher<const Config&>(_)))
+      .Times(0);
+
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      /*target_bitrate=*/DataRate::KilobitsPerSec(0),
+      /*stable_target_bitrate=*/DataRate::KilobitsPerSec(0),
+      /*link_allocation=*/DataRate::KilobitsPerSec(kDontCare),
       /*fraction_lost=*/0,
       /*rtt_ms=*/0,
       /*cwnd_reduce_ratio=*/0);
@@ -5196,10 +5696,11 @@ TEST_F(VideoStreamEncoderTest, ResolutionEncoderSwitch) {
   // The VideoStreamEncoder needs some bitrate before it can start encoding,
   // setting some bitrate so that subsequent calls to WaitForEncodedFrame does
   // not fail.
-  video_stream_encoder_->OnBitrateUpdated(
-      /*target_bitrate=*/DataRate::kbps(kSufficientBitrateToNotDrop),
-      /*stable_target_bitrate=*/DataRate::kbps(kSufficientBitrateToNotDrop),
-      /*link_allocation=*/DataRate::kbps(kSufficientBitrateToNotDrop),
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      /*target_bitrate=*/DataRate::KilobitsPerSec(kSufficientBitrateToNotDrop),
+      /*stable_target_bitrate=*/
+      DataRate::KilobitsPerSec(kSufficientBitrateToNotDrop),
+      /*link_allocation=*/DataRate::KilobitsPerSec(kSufficientBitrateToNotDrop),
       /*fraction_lost=*/0,
       /*rtt_ms=*/0,
       /*cwnd_reduce_ratio=*/0);
@@ -5257,16 +5758,16 @@ TEST_F(VideoStreamEncoderTest, EncoderSelectorBitrateSwitch) {
   // Reset encoder for new configuration to take effect.
   ConfigureEncoder(video_encoder_config_.Copy());
 
-  ON_CALL(encoder_selector, OnEncodingBitrate(_))
+  ON_CALL(encoder_selector, OnAvailableBitrate(_))
       .WillByDefault(Return(SdpVideoFormat("AV1")));
   EXPECT_CALL(switch_callback,
               RequestEncoderSwitch(Matcher<const SdpVideoFormat&>(
                   Field(&SdpVideoFormat::name, "AV1"))));
 
-  video_stream_encoder_->OnBitrateUpdated(
-      /*target_bitrate=*/DataRate::kbps(50),
-      /*stable_target_bitrate=*/DataRate::kbps(kDontCare),
-      /*link_allocation=*/DataRate::kbps(kDontCare),
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      /*target_bitrate=*/DataRate::KilobitsPerSec(50),
+      /*stable_target_bitrate=*/DataRate::KilobitsPerSec(kDontCare),
+      /*link_allocation=*/DataRate::KilobitsPerSec(kDontCare),
       /*fraction_lost=*/0,
       /*rtt_ms=*/0,
       /*cwnd_reduce_ratio=*/0);
@@ -5293,10 +5794,11 @@ TEST_F(VideoStreamEncoderTest, EncoderSelectorBrokenEncoderSwitch) {
   // The VideoStreamEncoder needs some bitrate before it can start encoding,
   // setting some bitrate so that subsequent calls to WaitForEncodedFrame does
   // not fail.
-  video_stream_encoder_->OnBitrateUpdated(
-      /*target_bitrate=*/DataRate::kbps(kSufficientBitrateToNotDrop),
-      /*stable_target_bitrate=*/DataRate::kbps(kSufficientBitrateToNotDrop),
-      /*link_allocation=*/DataRate::kbps(kSufficientBitrateToNotDrop),
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      /*target_bitrate=*/DataRate::KilobitsPerSec(kSufficientBitrateToNotDrop),
+      /*stable_target_bitrate=*/
+      DataRate::KilobitsPerSec(kSufficientBitrateToNotDrop),
+      /*link_allocation=*/DataRate::KilobitsPerSec(kSufficientBitrateToNotDrop),
       /*fraction_lost=*/0,
       /*rtt_ms=*/0,
       /*cwnd_reduce_ratio=*/0);
@@ -5332,8 +5834,8 @@ TEST_F(VideoStreamEncoderTest,
   const int kFrameHeight = 180;
 
   // Set initial rate.
-  auto rate = DataRate::kbps(100);
-  video_stream_encoder_->OnBitrateUpdated(
+  auto rate = DataRate::KilobitsPerSec(100);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
       /*target_bitrate=*/rate,
       /*stable_target_bitrate=*/rate,
       /*link_allocation=*/rate,
@@ -5350,8 +5852,8 @@ TEST_F(VideoStreamEncoderTest,
   EXPECT_EQ(1, fake_encoder_.GetNumSetRates());
 
   // Change of target bitrate propagates to the encoder.
-  auto new_stable_rate = rate - DataRate::kbps(5);
-  video_stream_encoder_->OnBitrateUpdated(
+  auto new_stable_rate = rate - DataRate::KilobitsPerSec(5);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
       /*target_bitrate=*/new_stable_rate,
       /*stable_target_bitrate=*/new_stable_rate,
       /*link_allocation=*/rate,
@@ -5369,8 +5871,8 @@ TEST_F(VideoStreamEncoderTest,
   const int kFrameHeight = 180;
 
   // Set initial rate.
-  auto rate = DataRate::kbps(100);
-  video_stream_encoder_->OnBitrateUpdated(
+  auto rate = DataRate::KilobitsPerSec(100);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
       /*target_bitrate=*/rate,
       /*stable_target_bitrate=*/rate,
       /*link_allocation=*/rate,
@@ -5388,8 +5890,8 @@ TEST_F(VideoStreamEncoderTest,
 
   // Set a higher target rate without changing the link_allocation. Should not
   // reset encoder's rate.
-  auto new_stable_rate = rate - DataRate::kbps(5);
-  video_stream_encoder_->OnBitrateUpdated(
+  auto new_stable_rate = rate - DataRate::KilobitsPerSec(5);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
       /*target_bitrate=*/rate,
       /*stable_target_bitrate=*/new_stable_rate,
       /*link_allocation=*/rate,
@@ -5416,12 +5918,13 @@ TEST_F(VideoStreamEncoderTest, AutomaticAnimationDetection) {
   video_source_.set_adaptation_enabled(true);
 
   // BALANCED degradation preference is required for this feature.
-  video_stream_encoder_->OnBitrateUpdated(
-      DataRate::bps(kTargetBitrateBps), DataRate::bps(kTargetBitrateBps),
-      DataRate::bps(kTargetBitrateBps), 0, 0, 0);
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
   video_stream_encoder_->SetSource(&video_source_,
                                    webrtc::DegradationPreference::BALANCED);
-  VerifyNoLimitation(video_source_.sink_wants());
+  EXPECT_THAT(video_source_.sink_wants(), UnlimitedSinkWants());
 
   VideoFrame frame = CreateFrame(1, kWidth, kHeight);
   frame.set_update_rect(VideoFrame::UpdateRect{0, 0, kWidth, kHeight});
@@ -5440,7 +5943,7 @@ TEST_F(VideoStreamEncoderTest, AutomaticAnimationDetection) {
   rtc::VideoSinkWants expected;
   expected.max_framerate_fps = kFramerateFps;
   expected.max_pixel_count = 1280 * 720 + 1;
-  VerifyFpsEqResolutionLt(video_source_.sink_wants(), expected);
+  EXPECT_THAT(video_source_.sink_wants(), FpsEqResolutionLt(expected));
 
   // Pass one frame with no known update.
   //  Resolution cap should be removed immediately.
@@ -5453,7 +5956,38 @@ TEST_F(VideoStreamEncoderTest, AutomaticAnimationDetection) {
   WaitForEncodedFrame(timestamp_ms);
 
   // Resolution should be unlimited now.
-  VerifyFpsEqResolutionMax(video_source_.sink_wants(), kFramerateFps);
+  EXPECT_THAT(video_source_.sink_wants(),
+              FpsMatchesResolutionMax(Eq(kFramerateFps)));
+
+  video_stream_encoder_->Stop();
+}
+
+TEST_F(VideoStreamEncoderTest, ConfiguresVp9SvcAtOddResolutions) {
+  const int kWidth = 720;  // 540p adapted down.
+  const int kHeight = 405;
+  const int kNumFrames = 3;
+  // Works on screenshare mode.
+  ResetEncoder("VP9", /*num_streams=*/1, /*num_temporal_layers=*/1,
+               /*num_spatial_layers=*/2, /*screenshare=*/true);
+
+  video_source_.set_adaptation_enabled(true);
+
+  video_stream_encoder_->OnBitrateUpdatedAndWaitForManagedResources(
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps),
+      DataRate::BitsPerSec(kTargetBitrateBps), 0, 0, 0);
+
+  VideoFrame frame = CreateFrame(1, kWidth, kHeight);
+
+  // Pass enough frames with the full update to trigger animation detection.
+  for (int i = 0; i < kNumFrames; ++i) {
+    int64_t timestamp_ms =
+        fake_clock_.TimeNanos() / rtc::kNumNanosecsPerMillisec;
+    frame.set_ntp_time_ms(timestamp_ms);
+    frame.set_timestamp_us(timestamp_ms * 1000);
+    video_source_.IncomingCapturedFrame(frame);
+    WaitForEncodedFrame(timestamp_ms);
+  }
 
   video_stream_encoder_->Stop();
 }

@@ -627,7 +627,7 @@ class MockTrackObserver : public ObserverInterface {
     }
   }
 
-  MOCK_METHOD0(OnChanged, void());
+  MOCK_METHOD(void, OnChanged, (), (override));
 
  private:
   NotifierInterface* notifier_;
@@ -1421,15 +1421,11 @@ TEST_P(PeerConnectionInterfaceTest, GetConfigurationAfterSetConfiguration) {
 
   PeerConnectionInterface::RTCConfiguration config = pc_->GetConfiguration();
   config.type = PeerConnectionInterface::kRelay;
-  config.use_datagram_transport = true;
-  config.use_datagram_transport_for_data_channels = true;
   EXPECT_TRUE(pc_->SetConfiguration(config).ok());
 
   PeerConnectionInterface::RTCConfiguration returned_config =
       pc_->GetConfiguration();
   EXPECT_EQ(PeerConnectionInterface::kRelay, returned_config.type);
-  EXPECT_TRUE(returned_config.use_datagram_transport);
-  EXPECT_TRUE(returned_config.use_datagram_transport_for_data_channels);
 }
 
 TEST_P(PeerConnectionInterfaceTest, SetConfigurationFailsAfterClose) {
@@ -3485,7 +3481,10 @@ TEST_P(PeerConnectionInterfaceTest, OffersAndAnswersHaveTrickleIceOption) {
   EXPECT_TRUE(desc->transport_infos()[1].description.HasOption("trickle"));
 
   // Apply the offer as a remote description, then create an answer.
+  EXPECT_FALSE(pc_->can_trickle_ice_candidates());
   EXPECT_TRUE(DoSetRemoteDescription(std::move(offer)));
+  ASSERT_TRUE(pc_->can_trickle_ice_candidates());
+  EXPECT_TRUE(*(pc_->can_trickle_ice_candidates()));
   std::unique_ptr<SessionDescriptionInterface> answer;
   ASSERT_TRUE(DoCreateAnswer(&answer, &options));
   desc = answer->description();

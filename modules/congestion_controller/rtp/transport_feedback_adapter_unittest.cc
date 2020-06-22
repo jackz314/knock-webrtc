@@ -72,7 +72,7 @@ PacketResult CreatePacket(int64_t receive_time_ms,
   res.receive_time = Timestamp::Millis(receive_time_ms);
   res.sent_packet.send_time = Timestamp::Millis(send_time_ms);
   res.sent_packet.sequence_number = sequence_number;
-  res.sent_packet.size = DataSize::bytes(payload_size);
+  res.sent_packet.size = DataSize::Bytes(payload_size);
   res.sent_packet.pacing_info = pacing_info;
   return res;
 }
@@ -83,8 +83,10 @@ namespace test {
 
 class MockStreamFeedbackObserver : public webrtc::StreamFeedbackObserver {
  public:
-  MOCK_METHOD1(OnPacketFeedbackVector,
-               void(std::vector<StreamPacketInfo> packet_feedback_vector));
+  MOCK_METHOD(void,
+              OnPacketFeedbackVector,
+              (std::vector<StreamPacketInfo> packet_feedback_vector),
+              (override));
 };
 
 class TransportFeedbackAdapterTest : public ::testing::Test {
@@ -110,9 +112,9 @@ class TransportFeedbackAdapterTest : public ::testing::Test {
     packet_info.transport_sequence_number =
         packet_feedback.sent_packet.sequence_number;
     packet_info.rtp_sequence_number = 0;
-    packet_info.has_rtp_sequence_number = true;
     packet_info.length = packet_feedback.sent_packet.size.bytes();
     packet_info.pacing_info = packet_feedback.sent_packet.pacing_info;
+    packet_info.packet_type = RtpPacketMediaType::kVideo;
     adapter_->AddPacket(RtpPacketSendInfo(packet_info), 0u,
                         clock_.CurrentTime());
     adapter_->ProcessSentPacket(rtc::SentPacket(
@@ -309,7 +311,7 @@ TEST_F(TransportFeedbackAdapterTest, TimestampDeltas) {
   packet_feedback.sent_packet.sequence_number = 1;
   packet_feedback.sent_packet.send_time = Timestamp::Millis(100);
   packet_feedback.receive_time = Timestamp::Millis(200);
-  packet_feedback.sent_packet.size = DataSize::bytes(1500);
+  packet_feedback.sent_packet.size = DataSize::Bytes(1500);
   sent_packets.push_back(packet_feedback);
 
   // TODO(srte): This rounding maintains previous behavior, but should ot be
@@ -395,6 +397,7 @@ TEST_F(TransportFeedbackAdapterTest, IgnoreDuplicatePacketSentCalls) {
   packet_info.transport_sequence_number = packet.sent_packet.sequence_number;
   packet_info.length = packet.sent_packet.size.bytes();
   packet_info.pacing_info = packet.sent_packet.pacing_info;
+  packet_info.packet_type = RtpPacketMediaType::kVideo;
   adapter_->AddPacket(packet_info, 0u, clock_.CurrentTime());
   absl::optional<SentPacket> sent_packet = adapter_->ProcessSentPacket(
       rtc::SentPacket(packet.sent_packet.sequence_number,

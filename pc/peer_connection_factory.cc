@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/match.h"
 #include "api/fec_controller.h"
 #include "api/media_stream_proxy.h"
 #include "api/media_stream_track_proxy.h"
@@ -22,7 +23,6 @@
 #include "api/peer_connection_proxy.h"
 #include "api/rtc_event_log/rtc_event_log.h"
 #include "api/transport/field_trial_based_config.h"
-#include "api/transport/media/media_transport_interface.h"
 #include "api/turn_customizer.h"
 #include "api/units/data_rate.h"
 #include "api/video_track_source_proxy.h"
@@ -81,7 +81,6 @@ PeerConnectionFactory::PeerConnectionFactory(
           std::move(dependencies.network_state_predictor_factory)),
       injected_network_controller_factory_(
           std::move(dependencies.network_controller_factory)),
-      media_transport_factory_(std::move(dependencies.media_transport_factory)),
       neteq_factory_(std::move(dependencies.neteq_factory)),
       trials_(dependencies.trials ? std::move(dependencies.trials)
                                   : std::make_unique<FieldTrialBasedConfig>()) {
@@ -160,19 +159,17 @@ RtpCapabilities PeerConnectionFactory::GetRtpSenderCapabilities(
   switch (kind) {
     case cricket::MEDIA_TYPE_AUDIO: {
       cricket::AudioCodecs cricket_codecs;
-      cricket::RtpHeaderExtensions cricket_extensions;
       channel_manager_->GetSupportedAudioSendCodecs(&cricket_codecs);
-      channel_manager_->GetSupportedAudioRtpHeaderExtensions(
-          &cricket_extensions);
-      return ToRtpCapabilities(cricket_codecs, cricket_extensions);
+      return ToRtpCapabilities(
+          cricket_codecs,
+          channel_manager_->GetDefaultEnabledAudioRtpHeaderExtensions());
     }
     case cricket::MEDIA_TYPE_VIDEO: {
       cricket::VideoCodecs cricket_codecs;
-      cricket::RtpHeaderExtensions cricket_extensions;
-      channel_manager_->GetSupportedVideoCodecs(&cricket_codecs);
-      channel_manager_->GetSupportedVideoRtpHeaderExtensions(
-          &cricket_extensions);
-      return ToRtpCapabilities(cricket_codecs, cricket_extensions);
+      channel_manager_->GetSupportedVideoSendCodecs(&cricket_codecs);
+      return ToRtpCapabilities(
+          cricket_codecs,
+          channel_manager_->GetDefaultEnabledVideoRtpHeaderExtensions());
     }
     case cricket::MEDIA_TYPE_DATA:
       return RtpCapabilities();
@@ -187,19 +184,17 @@ RtpCapabilities PeerConnectionFactory::GetRtpReceiverCapabilities(
   switch (kind) {
     case cricket::MEDIA_TYPE_AUDIO: {
       cricket::AudioCodecs cricket_codecs;
-      cricket::RtpHeaderExtensions cricket_extensions;
       channel_manager_->GetSupportedAudioReceiveCodecs(&cricket_codecs);
-      channel_manager_->GetSupportedAudioRtpHeaderExtensions(
-          &cricket_extensions);
-      return ToRtpCapabilities(cricket_codecs, cricket_extensions);
+      return ToRtpCapabilities(
+          cricket_codecs,
+          channel_manager_->GetDefaultEnabledAudioRtpHeaderExtensions());
     }
     case cricket::MEDIA_TYPE_VIDEO: {
       cricket::VideoCodecs cricket_codecs;
-      cricket::RtpHeaderExtensions cricket_extensions;
-      channel_manager_->GetSupportedVideoCodecs(&cricket_codecs);
-      channel_manager_->GetSupportedVideoRtpHeaderExtensions(
-          &cricket_extensions);
-      return ToRtpCapabilities(cricket_codecs, cricket_extensions);
+      channel_manager_->GetSupportedVideoReceiveCodecs(&cricket_codecs);
+      return ToRtpCapabilities(
+          cricket_codecs,
+          channel_manager_->GetDefaultEnabledVideoRtpHeaderExtensions());
     }
     case cricket::MEDIA_TYPE_DATA:
       return RtpCapabilities();
@@ -364,9 +359,12 @@ std::unique_ptr<Call> PeerConnectionFactory::CreateCall_w(
   call_config.audio_state =
       channel_manager_->media_engine()->voice().GetAudioState();
 
-  FieldTrialParameter<DataRate> min_bandwidth("min", DataRate::kbps(30));
-  FieldTrialParameter<DataRate> start_bandwidth("start", DataRate::kbps(300));
-  FieldTrialParameter<DataRate> max_bandwidth("max", DataRate::kbps(2000));
+  FieldTrialParameter<DataRate> min_bandwidth("min",
+                                              DataRate::KilobitsPerSec(30));
+  FieldTrialParameter<DataRate> start_bandwidth("start",
+                                                DataRate::KilobitsPerSec(300));
+  FieldTrialParameter<DataRate> max_bandwidth("max",
+                                              DataRate::KilobitsPerSec(2000));
   ParseFieldTrial({&min_bandwidth, &start_bandwidth, &max_bandwidth},
                   trials_->Lookup("WebRTC-PcFactoryDefaultBitrates"));
 
@@ -398,7 +396,7 @@ std::unique_ptr<Call> PeerConnectionFactory::CreateCall_w(
 
 bool PeerConnectionFactory::IsTrialEnabled(absl::string_view key) const {
   RTC_DCHECK(trials_);
-  return trials_->Lookup(key).find("Enabled") == 0;
+  return absl::StartsWith(trials_->Lookup(key), "Enabled");
 }
 
 }  // namespace webrtc

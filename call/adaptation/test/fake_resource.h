@@ -12,18 +12,31 @@
 #define CALL_ADAPTATION_TEST_FAKE_RESOURCE_H_
 
 #include <string>
+#include <vector>
 
-#include "call/adaptation/resource.h"
+#include "absl/types/optional.h"
+#include "api/adaptation/resource.h"
+#include "api/scoped_refptr.h"
 
 namespace webrtc {
 
 // Fake resource used for testing.
 class FakeResource : public Resource {
  public:
-  explicit FakeResource(ResourceUsageState usage_state);
+  static rtc::scoped_refptr<FakeResource> Create(std::string name);
+
+  explicit FakeResource(std::string name);
   ~FakeResource() override;
 
-  void set_usage_state(ResourceUsageState usage_state);
+  void SetUsageState(ResourceUsageState usage_state);
+
+  // Resource implementation.
+  std::string Name() const override;
+  void SetResourceListener(ResourceListener* listener) override;
+
+ private:
+  const std::string name_;
+  ResourceListener* listener_;
 };
 
 }  // namespace webrtc

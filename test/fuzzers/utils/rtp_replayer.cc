@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "api/task_queue/default_task_queue_factory.h"
+#include "api/transport/field_trial_based_config.h"
 #include "rtc_base/strings/json.h"
 #include "system_wrappers/include/clock.h"
 #include "test/call_config_utils.h"
@@ -23,6 +24,7 @@
 #include "test/fake_decoder.h"
 #include "test/rtp_file_reader.h"
 #include "test/rtp_header_parser.h"
+#include "test/run_loop.h"
 
 namespace webrtc {
 namespace test {
@@ -42,6 +44,7 @@ void RtpReplayer::Replay(
     std::vector<VideoReceiveStream::Config> receive_stream_configs,
     const uint8_t* rtp_dump_data,
     size_t rtp_dump_size) {
+  RunLoop loop;
   rtc::ScopedBaseFakeClock fake_clock;
 
   // Work around: webrtc calls webrtc::Random(clock.TimeInMicroseconds())
@@ -62,6 +65,8 @@ void RtpReplayer::Replay(
       CreateDefaultTaskQueueFactory();
   Call::Config call_config(&event_log);
   call_config.task_queue_factory = task_queue_factory.get();
+  FieldTrialBasedConfig field_trials;
+  call_config.trials = &field_trials;
   std::unique_ptr<Call> call(Call::Create(call_config));
   SetupVideoStreams(&receive_stream_configs, stream_state.get(), call.get());
 

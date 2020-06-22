@@ -32,9 +32,8 @@ constexpr int64_t kMinPacketsNumberPerInterval = 20;
 const TimeDelta kMinDurationOfMonitorInterval = TimeDelta::Millis(50);
 const TimeDelta kStartupDuration = TimeDelta::Millis(500);
 constexpr double kMinRateChangeBps = 4000;
-constexpr DataRate kMinRateHaveMultiplicativeRateChange =
-    DataRate::BitsPerSec<static_cast<int64_t>(kMinRateChangeBps /
-                                              kDefaultSamplingStep)>();
+constexpr DataRate kMinRateHaveMultiplicativeRateChange = DataRate::BitsPerSec(
+    static_cast<int64_t>(kMinRateChangeBps / kDefaultSamplingStep));
 
 // Bitrate controller constants.
 constexpr double kInitialConversionFactor = 5;
@@ -57,7 +56,7 @@ PccNetworkController::PccNetworkController(NetworkControllerConfig config)
       last_sent_packet_time_(Timestamp::PlusInfinity()),
       smoothed_packets_sending_interval_(TimeDelta::Zero()),
       mode_(Mode::kStartup),
-      default_bandwidth_(DataRate::kbps(kInitialBandwidthKbps)),
+      default_bandwidth_(DataRate::KilobitsPerSec(kInitialBandwidthKbps)),
       bandwidth_estimate_(default_bandwidth_),
       rtt_tracker_(TimeDelta::Millis(kInitialRttMs), kAlphaForRtt),
       monitor_interval_timeout_(TimeDelta::Millis(kInitialRttMs) *
@@ -216,9 +215,9 @@ NetworkControlUpdate PccNetworkController::OnSentPacket(SentPacket msg) {
             bandwidth_estimate_ * (1 - sign * sampling_step_)};
       } else {
         monitor_intervals_bitrates_ = {
-            DataRate::bps(std::max<double>(
+            DataRate::BitsPerSec(std::max<double>(
                 bandwidth_estimate_.bps() + sign * kMinRateChangeBps, 0)),
-            DataRate::bps(std::max<double>(
+            DataRate::BitsPerSec(std::max<double>(
                 bandwidth_estimate_.bps() - sign * kMinRateChangeBps, 0))};
       }
       monitor_intervals_.emplace_back(monitor_intervals_bitrates_[0],

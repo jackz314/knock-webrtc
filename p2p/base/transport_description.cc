@@ -14,6 +14,7 @@
 #include "absl/strings/match.h"
 #include "p2p/base/p2p_constants.h"
 #include "rtc_base/arraysize.h"
+#include "rtc_base/logging.h"
 #include "rtc_base/strings/string_builder.h"
 
 using webrtc::RTCError;
@@ -24,10 +25,20 @@ namespace cricket {
 namespace {
 
 bool IsIceChar(char c) {
+  // Note: '-', '=', '#' and '_' are *not* valid ice-chars but temporarily
+  // permitted in order to allow external software to upgrade.
+  if (c == '-' || c == '=' || c == '#' || c == '_') {
+    RTC_LOG(LS_WARNING)
+        << "'-', '=', '#' and '-' are not valid ice-char and thus not "
+        << "permitted in ufrag or pwd. This is a protocol violation that "
+        << "is permitted to allow upgrading but will be rejected in "
+        << "the future. See https://crbug.com/1053756";
+    return true;
+  }
   return absl::ascii_isalnum(c) || c == '+' || c == '/';
 }
 
-RTCErrorOr<std::string> ParseIceUfrag(absl::string_view raw_ufrag) {
+RTCError ValidateIceUfrag(absl::string_view raw_ufrag) {
   if (!(ICE_UFRAG_MIN_LENGTH <= raw_ufrag.size() &&
         raw_ufrag.size() <= ICE_UFRAG_MAX_LENGTH)) {
     rtc::StringBuilder sb;
@@ -42,10 +53,10 @@ RTCErrorOr<std::string> ParseIceUfrag(absl::string_view raw_ufrag) {
         "ICE ufrag must contain only alphanumeric characters, '+', and '/'.");
   }
 
-  return std::string(raw_ufrag);
+  return RTCError::OK();
 }
 
-RTCErrorOr<std::string> ParseIcePwd(absl::string_view raw_pwd) {
+RTCError ValidateIcePwd(absl::string_view raw_pwd) {
   if (!(ICE_PWD_MIN_LENGTH <= raw_pwd.size() &&
         raw_pwd.size() <= ICE_PWD_MAX_LENGTH)) {
     rtc::StringBuilder sb;
@@ -60,35 +71,41 @@ RTCErrorOr<std::string> ParseIcePwd(absl::string_view raw_pwd) {
         "ICE pwd must contain only alphanumeric characters, '+', and '/'.");
   }
 
-  return std::string(raw_pwd);
+  return RTCError::OK();
 }
 
 }  // namespace
 
-// static
 RTCErrorOr<IceParameters> IceParameters::Parse(absl::string_view raw_ufrag,
                                                absl::string_view raw_pwd) {
+  IceParameters parameters(std::string(raw_ufrag), std::string(raw_pwd),
+                           /* renomination= */ false);
+  auto result = parameters.Validate();
+  if (!result.ok()) {
+    return result;
+  }
+  return parameters;
+}
+
+RTCError IceParameters::Validate() const {
   // For legacy protocols.
   // TODO(zhihuang): Remove this once the legacy protocol is no longer
   // supported.
-  if (raw_ufrag.empty() && raw_pwd.empty()) {
-    return IceParameters();
+  if (ufrag.empty() && pwd.empty()) {
+    return RTCError::OK();
   }
 
-  auto ufrag_result = ParseIceUfrag(raw_ufrag);
+  auto ufrag_result = ValidateIceUfrag(ufrag);
   if (!ufrag_result.ok()) {
-    return ufrag_result.MoveError();
+    return ufrag_result;
   }
 
-  auto pwd_result = ParseIcePwd(raw_pwd);
+  auto pwd_result = ValidateIcePwd(pwd);
   if (!pwd_result.ok()) {
-    return pwd_result.MoveError();
+    return pwd_result;
   }
 
-  IceParameters parameters;
-  parameters.ufrag = ufrag_result.MoveValue();
-  parameters.pwd = pwd_result.MoveValue();
-  return parameters;
+  return RTCError::OK();
 }
 
 bool StringToConnectionRole(const std::string& role_str, ConnectionRole* role) {
@@ -155,8 +172,7 @@ TransportDescription::TransportDescription(const TransportDescription& from)
       ice_pwd(from.ice_pwd),
       ice_mode(from.ice_mode),
       connection_role(from.connection_role),
-      identity_fingerprint(CopyFingerprint(from.identity_fingerprint.get())),
-      opaque_parameters(from.opaque_parameters) {}
+      identity_fingerprint(CopyFingerprint(from.identity_fingerprint.get())) {}
 
 TransportDescription::~TransportDescription() = default;
 
@@ -173,7 +189,6 @@ TransportDescription& TransportDescription::operator=(
   connection_role = from.connection_role;
 
   identity_fingerprint.reset(CopyFingerprint(from.identity_fingerprint.get()));
-  opaque_parameters = from.opaque_parameters;
   return *this;
 }
 

@@ -33,8 +33,8 @@ void LogBasedNetworkControllerSimulation::ProcessUntil(Timestamp to_time) {
   if (last_process_.IsInfinite()) {
     NetworkControllerConfig config;
     config.constraints.at_time = to_time;
-    config.constraints.min_data_rate = DataRate::kbps(30);
-    config.constraints.starting_rate = DataRate::kbps(300);
+    config.constraints.min_data_rate = DataRate::KilobitsPerSec(30);
+    config.constraints.starting_rate = DataRate::KilobitsPerSec(300);
     config.event_log = &null_event_log_;
     controller_ = factory_->Create(config);
   }
@@ -86,7 +86,6 @@ void LogBasedNetworkControllerSimulation::OnPacketSent(
     packet_info.ssrc = packet.ssrc;
     packet_info.transport_sequence_number = packet.transport_seq_no;
     packet_info.rtp_sequence_number = packet.stream_seq_no;
-    packet_info.has_rtp_sequence_number = true;
     packet_info.length = packet.size;
     packet_info.pacing_info = probe_info;
     transport_feedback_.AddPacket(packet_info, packet.overhead,
@@ -168,8 +167,8 @@ void LogBasedNetworkControllerSimulation::OnIceConfig(
     ProcessUntil(log_time);
     NetworkRouteChange msg;
     msg.at_time = log_time;
-    msg.constraints.min_data_rate = DataRate::kbps(30);
-    msg.constraints.starting_rate = DataRate::kbps(300);
+    msg.constraints.min_data_rate = DataRate::KilobitsPerSec(30);
+    msg.constraints.starting_rate = DataRate::KilobitsPerSec(300);
     msg.constraints.at_time = log_time;
     HandleStateUpdate(controller_->OnNetworkRouteChange(msg));
   }

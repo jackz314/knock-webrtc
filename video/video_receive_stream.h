@@ -15,7 +15,6 @@
 #include <vector>
 
 #include "api/task_queue/task_queue_factory.h"
-#include "api/transport/media/media_transport_interface.h"
 #include "api/video/recordable_encoded_frame.h"
 #include "call/rtp_packet_sink_interface.h"
 #include "call/syncable.h"
@@ -99,6 +98,8 @@ class VideoReceiveStream : public webrtc::VideoReceiveStream,
 
   void SetFrameDecryptor(
       rtc::scoped_refptr<FrameDecryptorInterface> frame_decryptor) override;
+  void SetDepacketizerToDecoderFrameTransformer(
+      rtc::scoped_refptr<FrameTransformerInterface> frame_transformer) override;
 
   // Implements rtc::VideoSinkInterface<VideoFrame>.
   void OnFrame(const VideoFrame& video_frame) override;

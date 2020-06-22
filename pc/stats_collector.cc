@@ -483,6 +483,10 @@ const char* AdapterTypeToStatsType(rtc::AdapterType type) {
     case rtc::ADAPTER_TYPE_WIFI:
       return STATSREPORT_ADAPTER_TYPE_WIFI;
     case rtc::ADAPTER_TYPE_CELLULAR:
+    case rtc::ADAPTER_TYPE_CELLULAR_2G:
+    case rtc::ADAPTER_TYPE_CELLULAR_3G:
+    case rtc::ADAPTER_TYPE_CELLULAR_4G:
+    case rtc::ADAPTER_TYPE_CELLULAR_5G:
       return STATSREPORT_ADAPTER_TYPE_WWAN;
     case rtc::ADAPTER_TYPE_VPN:
       return STATSREPORT_ADAPTER_TYPE_VPN;
@@ -1024,7 +1028,7 @@ class VideoMediaChannelStatsGatherer final : public MediaChannelStatsGatherer {
 
   void ExtractStats(StatsCollector* collector) const override {
     ExtractSenderReceiverStats(collector, video_media_info.receivers,
-                               video_media_info.senders);
+                               video_media_info.aggregated_senders);
   }
 
   bool HasRemoteAudio() const override { return false; }
@@ -1142,19 +1146,20 @@ void StatsCollector::ExtractDataInfo() {
 
   rtc::Thread::ScopedDisallowBlockingCalls no_blocking_calls;
 
-  for (const auto& dc : pc_->sctp_data_channels()) {
+  std::vector<DataChannel::Stats> data_stats = pc_->GetDataChannelStats();
+  for (const auto& stats : data_stats) {
     StatsReport::Id id(StatsReport::NewTypedIntId(
-        StatsReport::kStatsReportTypeDataChannel, dc->id()));
+        StatsReport::kStatsReportTypeDataChannel, stats.id));
     StatsReport* report = reports_.ReplaceOrAddNew(id);
     report->set_timestamp(stats_gathering_started_);
-    report->AddString(StatsReport::kStatsValueNameLabel, dc->label());
+    report->AddString(StatsReport::kStatsValueNameLabel, stats.label);
     // Filter out the initial id (-1).
-    if (dc->id() >= 0) {
-      report->AddInt(StatsReport::kStatsValueNameDataChannelId, dc->id());
+    if (stats.id >= 0) {
+      report->AddInt(StatsReport::kStatsValueNameDataChannelId, stats.id);
     }
-    report->AddString(StatsReport::kStatsValueNameProtocol, dc->protocol());
+    report->AddString(StatsReport::kStatsValueNameProtocol, stats.protocol);
     report->AddString(StatsReport::kStatsValueNameState,
-                      DataChannelInterface::DataStateString(dc->state()));
+                      DataChannelInterface::DataStateString(stats.state));
   }
 }
 

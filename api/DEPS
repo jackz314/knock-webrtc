@@ -90,6 +90,10 @@ specific_include_rules = {
     "+modules/include/module_fec_types.h",
   ],
 
+  "frame_transformer_interface\.h": [
+    "+rtc_base/ref_count.h",
+  ],
+
   "ice_transport_interface\.h": [
     "+rtc_base/ref_count.h",
   ],
@@ -109,11 +113,6 @@ specific_include_rules = {
   "media_stream_interface\.h": [
     "+modules/audio_processing/include/audio_processing_statistics.h",
     "+rtc_base/ref_count.h",
-  ],
-
-  "media_transport_interface\.h": [
-    "+rtc_base/copy_on_write_buffer.h",  # As used by datachannelinterface.h
-    "+rtc_base/network_route.h",
   ],
 
   "packet_socket_factory\.h": [
@@ -239,6 +238,10 @@ specific_include_rules = {
   ],
 
   "audioproc_float\.h": [
+    "+modules/audio_processing/include/audio_processing.h",
+  ],
+
+  "echo_detector_creator\.h": [
     "+modules/audio_processing/include/audio_processing.h",
   ],
 

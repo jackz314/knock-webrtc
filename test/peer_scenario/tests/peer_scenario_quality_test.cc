@@ -10,11 +10,16 @@
 
 #include "test/gtest.h"
 #include "test/peer_scenario/peer_scenario.h"
+#include "test/peer_scenario/peer_scenario_client.h"
 
 namespace webrtc {
 namespace test {
-
-TEST(PeerScenarioQualityTest, PsnrIsCollected) {
+#if defined(WEBRTC_WIN)
+#define MAYBE_PsnrIsCollected DISABLED_PsnrIsCollected
+#else
+#define MAYBE_PsnrIsCollected PsnrIsCollected
+#endif
+TEST(PeerScenarioQualityTest, MAYBE_PsnrIsCollected) {
   VideoQualityAnalyzer analyzer;
   {
     PeerScenario s(*test_info_);
